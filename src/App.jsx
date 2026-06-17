@@ -4,6 +4,8 @@ import {
   ChevronLeft, ChevronRight, User, Wallet, CalendarDays,
   MapPin, Inbox, Send, Search, RotateCcw, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
 } from 'lucide-react';
+import { db } from './firebase';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 /* ---------------------------------- 常數 ---------------------------------- */
 
@@ -156,17 +158,20 @@ function copyText(text) {
 
 async function loadKey(key, fallback) {
   try {
-    const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw);
+    const ref = doc(db, 'appData', key);
+    const snap = await getDoc(ref);
+    if (snap.exists()) return snap.data().value;
     return fallback;
   } catch (e) {
+    console.error('讀取失敗', key, e);
     return fallback;
   }
 }
 
 async function saveKey(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    const ref = doc(db, 'appData', key);
+    await setDoc(ref, { value });
   } catch (e) {
     console.error('儲存失敗', key, e);
   }
