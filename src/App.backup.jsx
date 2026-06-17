@@ -4,9 +4,8 @@ import {
   ChevronLeft, ChevronRight, User, Wallet, CalendarDays,
   MapPin, Inbox, Send, Search, RotateCcw, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
 } from 'lucide-react';
-import { db, auth } from './firebase';
+import { db } from './firebase';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
 
 /* ---------------------------------- 常數 ---------------------------------- */
 
@@ -981,10 +980,8 @@ export default function BoothBookingApp() {
 
   const [adminUnlocked, setAdminUnlocked] = useState(false);
   const [showPinBox, setShowPinBox] = useState(false);
-  const [adminEmail, setAdminEmail] = useState('');
-  const [adminPassword, setAdminPassword] = useState('');
-  const [adminLoginError, setAdminLoginError] = useState('');
-  const [adminUser, setAdminUser] = useState(null);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
 
   const todayD = new Date();
   const [viewYear, setViewYear] = useState(todayD.getFullYear());
@@ -1156,34 +1153,18 @@ export default function BoothBookingApp() {
     }
   }
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setAdminUser(user);
-      setAdminUnlocked(!!user);
-      if (!user && ['pending', 'hostOverview', 'finance', 'staff', 'reminders', 'import', 'texts'].includes(tab)) {
-        setTab('overview');
-      }
-      if (!user && viewMode === 'table') setViewMode('calendar');
-    });
-    return () => unsubscribe();
-  }, [tab, viewMode]);
-
-  async function handleUnlock() {
-    try {
-      setAdminLoginError('');
-      await signInWithEmailAndPassword(auth, adminEmail.trim(), adminPassword);
+  function handleUnlock() {
+    if (pinInput === ADMIN_PIN) {
+      setAdminUnlocked(true);
       setShowPinBox(false);
-      setAdminPassword('');
-    } catch (e) {
-      setAdminLoginError('登入失敗，請確認 Email 或密碼是否正確');
+      setPinInput('');
+      setPinError(false);
+    } else {
+      setPinError(true);
     }
   }
-
-  async function handleLock() {
-    await signOut(auth);
+  function handleLock() {
     setAdminUnlocked(false);
-    setAdminUser(null);
-    setAdminPassword('');
     if (['pending', 'hostOverview', 'finance', 'staff', 'reminders', 'import', 'texts'].includes(tab)) setTab('overview');
     if (viewMode === 'table') setViewMode('calendar');
   }
@@ -1238,13 +1219,7 @@ export default function BoothBookingApp() {
     closeModal();
   }
 
-  function handleDelete(id) {
-    const nextBookings = bookings.filter((b) => b.id !== id);
-    const nextDraft = tableDraft.filter((b) => b.id !== id);
-    persistBookings(nextBookings);
-    setTableDraft(nextDraft);
-    setConfirmDeleteId(null);
-  }
+  function handleDelete(id) { persistBookings(bookings.filter((b) => b.id !== id)); setConfirmDeleteId(null); }
   function handleReject(id) { persistPending(pending.map((p) => (p.id === id ? { ...p, status: 'rejected' } : p))); setConfirmRejectId(null); }
   function togglePayment(id) {
     persistBookings(bookings.map((b) => (b.id === id ? { ...b, paymentStatus: b.paymentStatus === 'paid' ? 'unpaid' : 'paid' } : b)));
@@ -1695,21 +1670,16 @@ export default function BoothBookingApp() {
             ) : showPinBox ? (
               <div className="pin-box">
                 <input
-                  type="email"
-                  placeholder="管理員 Email"
-                  value={adminEmail}
-                  onChange={(e) => { setAdminEmail(e.target.value); setAdminLoginError(''); }}
+                  type="password"
+                  inputMode="numeric"
+                  placeholder="PIN"
+                  value={pinInput}
+                  onChange={(e) => { setPinInput(e.target.value); setPinError(false); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleUnlock(); }}
                   autoFocus
                 />
-                <input
-                  type="password"
-                  placeholder="管理員密碼"
-                  value={adminPassword}
-                  onChange={(e) => { setAdminPassword(e.target.value); setAdminLoginError(''); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleUnlock(); }}
-                />
-                <button type="button" className="btn-primary small" onClick={handleUnlock}>登入</button>
-                {adminLoginError && <span className="pin-error">{adminLoginError}</span>}
+                <button type="button" className="btn-primary small" onClick={handleUnlock}>解鎖</button>
+                {pinError && <span className="pin-error">PIN 錯誤</span>}
               </div>
             ) : (
               <button type="button" className="lock-btn" onClick={() => setShowPinBox(true)}>
@@ -2016,18 +1986,16 @@ export default function BoothBookingApp() {
             {getText('host_hint') && <p className="hint">{getText('host_hint')}</p>}
             <div className="host-search">
               <Search size={16} />
-              <select
+              <input
+                type="text"
+                list="host-name-list"
+                placeholder="輸入姓名"
                 value={hostQuery}
-                onChange={(e) => {
-                  setHostQuery(e.target.value);
-                  setPwInput('');
-                  setPwError(false);
-                  setUnlockedFor(null);
-                }}
-              >
-                <option value="">請選擇主持人</option>
-                {hostNames.map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
+                onChange={(e) => { setHostQuery(e.target.value); setPwInput(''); setPwError(false); }}
+              />
+              <datalist id="host-name-list">
+                {hostNames.map((n) => <option key={n} value={n} />)}
+              </datalist>
             </div>
 
             {!hostMatches && <div className="empty-state"><User size={28} /><p>輸入姓名後會顯示您的場次</p></div>}
@@ -3048,86 +3016,4 @@ const baseStyles = `
 
 :focus-visible { outline: 2px solid #D6677C; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-@media (max-width: 768px) {
-  .booth-app {
-    width: 100%;
-    max-width: 100%;
-    overflow-x: hidden;
-  }
-
-  .header-top {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 12px;
-  }
-
-  .lock-area,
-  .pin-box {
-    width: 100%;
-  }
-
-  .pin-box {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .pin-box input,
-  .pin-box button {
-    width: 100%;
-  }
-
-  .tabs {
-    display: flex;
-    overflow-x: auto;
-    white-space: nowrap;
-    gap: 8px;
-    padding-bottom: 6px;
-  }
-
-  .tab-btn {
-    flex: 0 0 auto;
-  }
-
-  .main-grid,
-  .form-grid,
-  .summary-grid,
-  .finance-grid {
-    grid-template-columns: 1fr !important;
-  }
-
-  .ticket,
-  .card,
-  .panel,
-  .modal-box {
-    max-width: 100%;
-  }
-
-  .modal-box {
-    width: calc(100vw - 24px);
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .host-row,
-  .staff-row,
-  .reminder-row,
-  .ticket-row,
-  .ticket-footer {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-  }
-
-  input,
-  select,
-  textarea,
-  button {
-    max-width: 100%;
-  }
-
-  .table-wrap {
-    overflow-x: auto;
-  }
-}
-
 `;
