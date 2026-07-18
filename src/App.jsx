@@ -2034,7 +2034,12 @@ export default function BoothBookingApp() {
     tabs.push({ key: 'pending', label: '待確認', Icon: Inbox, badge: pendingActive.length });
     tabs.push({ key: 'hostOverview', label: '主持人總覽', Icon: Users });
     tabs.push({ key: 'finance', label: '金額總覽', Icon: Wallet });
-    tabs.push({ key: 'staff', label: '夥伴帳號', Icon: Key });
+    tabs.push({
+      key: 'staff',
+      label: '夥伴帳號',
+      Icon: Key,
+      badge: accessRequests.filter((item) => item.status === 'pending').length,
+    });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
