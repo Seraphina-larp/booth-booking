@@ -2028,11 +2028,14 @@ export default function BoothBookingApp() {
     { key: 'feedback', label: '帶場回饋', Icon: MessageSquare },
   ];
   if (currentProfile?.role === 'staff' || adminUnlocked) {
-    tabs.splice(2, 0, { key: 'host', label: '我的場次與薪資', Icon: Search });
+    tabs.splice(2, 0, {
+      key: 'host',
+      label: adminUnlocked ? '主持人總覽' : '我的場次與薪資',
+      Icon: adminUnlocked ? Users : Search,
+    });
   }
   if (adminUnlocked) {
     tabs.push({ key: 'pending', label: '待確認', Icon: Inbox, badge: pendingActive.length });
-    tabs.push({ key: 'hostOverview', label: '主持人總覽', Icon: Users });
     tabs.push({ key: 'finance', label: '金額總覽', Icon: Wallet });
     tabs.push({
       key: 'staff',
@@ -2406,7 +2409,7 @@ export default function BoothBookingApp() {
           </section>
         )}
 
-        {tab === 'host' && (
+        {tab === 'host' && !adminUnlocked && (
           <section>
             <h2>主持人查詢</h2>
             {getText('host_hint') && <p className="hint">{getText('host_hint')}</p>}
@@ -2614,7 +2617,7 @@ export default function BoothBookingApp() {
           </section>
         )}
 
-        {tab === 'hostOverview' && adminUnlocked && (
+        {tab === 'host' && adminUnlocked && (
           <section>
             <h2>主持人總覽</h2>
             <p className="hint">不需要密碼，這裡可以一次看到每位主持人／NPC的所有場次，點開姓名就能展開，金額也可以直接在這裡切換已給付狀態。</p>
@@ -2633,27 +2636,37 @@ export default function BoothBookingApp() {
                 <details key={name} className="host-overview-block">
                   <summary>{name}（即將到來 {data.upcoming.length} 筆{hostOverviewShowPast ? `，過去 ${data.past.length} 筆` : ''}）</summary>
                   {data.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
-                  {data.upcoming.map((b) => (
-                    <SessionCard
-                      key={b.id} booking={b} rooms={rooms} adminUnlocked
-                      showMoney viewerName={name}
-                      onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
-                      onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
-                      confirmingDelete={confirmDeleteId === b.id}
-                      onConfirmDelete={handleDelete}
-                      onCancelDelete={() => setConfirmDeleteId(null)}
-                    />
+                  {groupByMonth(data.upcoming).map((group) => (
+                    <div className="staff-month-group" key={`${name}-upcoming-${group.monthKey}`}>
+                      <div className="staff-month-heading">{group.label}</div>
+                      {group.bookings.map((b) => (
+                        <SessionCard
+                          key={b.id} booking={b} rooms={rooms} adminUnlocked showDate
+                          showMoney viewerName={name}
+                          onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
+                          onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
+                          confirmingDelete={confirmDeleteId === b.id}
+                          onConfirmDelete={handleDelete}
+                          onCancelDelete={() => setConfirmDeleteId(null)}
+                        />
+                      ))}
+                    </div>
                   ))}
-                  {hostOverviewShowPast && data.past.map((b) => (
-                    <SessionCard
-                      key={b.id} booking={b} rooms={rooms} adminUnlocked
-                      showMoney viewerName={name}
-                      onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
-                      onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
-                      confirmingDelete={confirmDeleteId === b.id}
-                      onConfirmDelete={handleDelete}
-                      onCancelDelete={() => setConfirmDeleteId(null)}
-                    />
+                  {hostOverviewShowPast && groupByMonth(data.past, true).map((group) => (
+                    <div className="staff-month-group" key={`${name}-past-${group.monthKey}`}>
+                      <div className="staff-month-heading">{group.label}・過去場次</div>
+                      {group.bookings.map((b) => (
+                        <SessionCard
+                          key={b.id} booking={b} rooms={rooms} adminUnlocked showDate
+                          showMoney viewerName={name}
+                          onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
+                          onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
+                          confirmingDelete={confirmDeleteId === b.id}
+                          onConfirmDelete={handleDelete}
+                          onCancelDelete={() => setConfirmDeleteId(null)}
+                        />
+                      ))}
+                    </div>
                   ))}
                 </details>
               );
