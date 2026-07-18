@@ -1,0 +1,106 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profile() {
+      return get(/databases/$(database)/documents/profiles/$(request.auth.uid));
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/profiles/$(request.auth.uid))
+        && profile().data.role == 'admin';
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function isStaffOwner(uid) {
+      return isOwner(uid)
+        && exists(/databases/$(database)/documents/profiles/$(request.auth.uid))
+        && profile().data.role == 'staff';
+    }
+
+    match /publicBookings/{bookingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /publicConfig/{documentId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /applications/{applicationId} {
+      allow create: if
+        request.resource.data.keys().hasOnly([
+          'id', 'partnerName', 'contact', 'preferredDate', 'preferredRoomId',
+          'preferredSlot', 'preferredTimeStart', 'preferredTimeEnd',
+          'activityName', 'estimatedHours', 'notes', 'status', 'submittedAt'
+        ])
+        && request.resource.data.id == applicationId
+        && request.resource.data.status == 'pending'
+        && request.resource.data.partnerName is string
+        && request.resource.data.partnerName.size() <= 100
+        && request.resource.data.contact is string
+        && request.resource.data.contact.size() <= 200
+        && request.resource.data.activityName is string
+        && request.resource.data.activityName.size() <= 200
+        && request.resource.data.notes is string
+        && request.resource.data.notes.size() <= 2000;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /feedback/{feedbackId} {
+      allow create: if
+        request.resource.data.keys().hasOnly([
+          'id', 'hostName', 'activityName', 'feedbackType', 'content',
+          'submittedAt', 'status'
+        ])
+        && request.resource.data.id == feedbackId
+        && request.resource.data.status == 'new'
+        && request.resource.data.hostName is string
+        && request.resource.data.hostName.size() <= 100
+        && request.resource.data.content is string
+        && request.resource.data.content.size() <= 4000;
+      allow read, update, delete: if isAdmin();
+    }
+
+    match /profiles/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /staffViews/{uid}/bookings/{bookingId} {
+      allow read: if isStaffOwner(uid) || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /bookings/{bookingId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /staffProfiles/{uid} {
+      allow read, write: if isAdmin();
+    }
+
+    match /privateConfig/{documentId} {
+      allow read, write: if isAdmin();
+    }
+
+    // 舊版整包資料僅供管理員執行一次性遷移；不再開放給訪客或夥伴。
+    match /appData/{documentId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
