@@ -1,14 +1,18 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Sunrise, Sun, Moon, Plus, Pencil, Trash2, Check, X, Lock, Unlock,
   ChevronLeft, ChevronRight, User, Wallet, CalendarDays,
   MapPin, Inbox, Send, Search, RotateCcw, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
 } from 'lucide-react';
 import { auth } from './firebase';
-import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification,
+  signInWithEmailAndPassword, signOut,
+} from 'firebase/auth';
 import {
   deleteBookingSecure,
   deleteStaffProfile,
+  approveAccessRequest,
   loadAdminData,
   loadLegacyData,
   loadProfile,
@@ -22,6 +26,7 @@ import {
   savePublicConfig,
   saveStaffProfile,
   submitApplication,
+  submitAccessRequest,
   submitFeedback,
 } from './dataAccess';
 
@@ -513,7 +518,7 @@ function SessionCard({
   const meta = CATEGORY_META[booking.category] || CATEGORY_META.own;
   const hostsList = getHostsList(booking);
   const normViewer = viewerName ? viewerName.trim().toLowerCase() : null;
-  const myHosts = normViewer ? hostsList.filter((h) => (h.name || '').trim().toLowerCase() === normViewer) : hostsList;
+  const isMyHost = (host) => !normViewer || (host.name || '').trim().toLowerCase() === normViewer;
   const isRentOutSelf = booking.category === 'rentOut' && normViewer && (booking.personName || '').trim().toLowerCase() === normViewer;
   const showTotal = showMoney && (!normViewer || isRentOutSelf);
   const totalAmount = computeAmount(booking);
@@ -556,13 +561,13 @@ function SessionCard({
         </div>
       )}
 
-      {myHosts.map((h) => {
+      {hostsList.map((h) => {
         const hasWage = h.wage !== '' && h.wage !== undefined && h.wage !== null;
         return (
           <div className="person-line host-line" key={h.id || h.name}>
             <User size={13} />
             <span className="host-name-role">{h.role || '主持人'}：{h.name || '未填'}</span>
-            {showMoney && hasWage && (
+            {showMoney && isMyHost(h) && hasWage && (
               <>
                 <span className="host-wage">薪水 {formatMoney(h.wage)}</span>
                 <PaymentChip
@@ -917,6 +922,24 @@ function AddStaffAccountForm({ onAdd }) {
   );
 }
 
+function PendingAccessRequest({ request, names, onApprove }) {
+  const exact = names.includes(request.requestedName) ? request.requestedName : '';
+  const [selectedName, setSelectedName] = useState(exact);
+  return (
+    <div className="staff-row access-request-row">
+      <div><strong>{request.requestedName}</strong><br /><span className="hint small">{request.email}</span></div>
+      <select value={selectedName} onChange={(e) => setSelectedName(e.target.value)}>
+        <option value="">選擇要綁定的既有人員</option>
+        {names.map((name) => <option key={name} value={name}>{name}</option>)}
+      </select>
+      <div className="hint small">Email 驗證後即可登入</div>
+      <button type="button" className="btn-primary small" disabled={!selectedName} onClick={() => onApprove(request, selectedName)}>
+        核准並建立副本
+      </button>
+    </div>
+  );
+}
+
 function TextEditRow({ label, value, defaultValue, onSave, onReset }) {
   const [val, setVal] = useState(value);
   const [saved, setSaved] = useState(false);
@@ -983,6 +1006,7 @@ export default function BoothBookingApp() {
   const [pending, setPending] = useState([]);
   const [staffDirectory, setStaffDirectory] = useState({});
   const [staffProfiles, setStaffProfiles] = useState([]);
+  const [accessRequests, setAccessRequests] = useState([]);
   const [feedbackList, setFeedbackList] = useState([]);
   const [reminderLog, setReminderLog] = useState({});
   const [syncConfig, setSyncConfig] = useState({ sheetName: '', lastSyncAt: '', lastSyncMessage: '' });
@@ -996,8 +1020,12 @@ export default function BoothBookingApp() {
   const [adminEmail, setAdminEmail] = useState('');
   const [adminPassword, setAdminPassword] = useState('');
   const [adminLoginError, setAdminLoginError] = useState('');
+  const [registerMode, setRegisterMode] = useState(false);
+  const [registerName, setRegisterName] = useState('');
+  const [registerMessage, setRegisterMessage] = useState('');
   const [adminUser, setAdminUser] = useState(null);
   const [currentProfile, setCurrentProfile] = useState(null);
+  const registrationInProgress = useRef(false);
   const [migrationState, setMigrationState] = useState('idle');
 
   const todayD = new Date();
@@ -1262,6 +1290,7 @@ export default function BoothBookingApp() {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (user && registrationInProgress.current) return;
       setAdminUser(user);
       setAdminUnlocked(false);
       setCurrentProfile(null);
@@ -1277,6 +1306,7 @@ export default function BoothBookingApp() {
         setPending([]);
         setFeedbackList([]);
         setStaffProfiles([]);
+        setAccessRequests([]);
         setTab('overview');
         setViewMode('calendar');
         return;
@@ -1297,11 +1327,23 @@ export default function BoothBookingApp() {
           setPending(data.pending || []);
           setFeedbackList(data.feedback || []);
           setStaffProfiles(data.staffProfiles || []);
+          setAccessRequests(data.accessRequests || []);
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
         } else {
-          const ownBookings = await loadStaffBookings(user.uid);
-          setBookings(ownBookings);
+          if (!user.emailVerified) {
+            setAdminLoginError('請先到信箱完成 Email 驗證，再回來登入');
+            await signOut(auth);
+            return;
+          }
+          const [publicData, ownBookings] = await Promise.all([
+            loadPublicData(),
+            loadStaffBookings(user.uid),
+          ]);
+          const ownById = new Map(ownBookings.map((booking) => [booking.id, booking]));
+          setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
+          setPageTexts(publicData.pageTexts || {});
+          setBookings((publicData.bookings || []).map((booking) => ownById.get(booking.id) || booking));
           setHostQuery(profile.displayName || '');
           setUnlockedFor(profile.displayName || '');
           setTab('host');
@@ -1322,6 +1364,41 @@ export default function BoothBookingApp() {
       setAdminPassword('');
     } catch (e) {
       setAdminLoginError('登入失敗，請確認 Email 或密碼是否正確');
+    }
+  }
+
+  async function handleRegister() {
+    const email = adminEmail.trim();
+    const name = registerName.trim();
+    if (!name || !email || adminPassword.length < 6) {
+      setAdminLoginError('請填姓名、Email，密碼至少 6 個字元');
+      return;
+    }
+    registrationInProgress.current = true;
+    setAdminLoginError('');
+    setRegisterMessage('');
+    try {
+      const credential = await createUserWithEmailAndPassword(auth, email, adminPassword);
+      await submitAccessRequest({
+        uid: credential.user.uid,
+        email,
+        requestedName: name,
+        status: 'pending',
+        submittedAt: new Date().toISOString(),
+      });
+      await sendEmailVerification(credential.user);
+      await signOut(auth);
+      setRegisterMessage('申請已送出！請到信箱點驗證連結，並等待管理者核准。');
+      setAdminPassword('');
+    } catch (error) {
+      const messages = {
+        'auth/email-already-in-use': '這個 Email 已經註冊過，請直接登入或聯絡管理者',
+        'auth/invalid-email': 'Email 格式不正確',
+        'auth/weak-password': '密碼強度不足，請至少輸入 6 個字元',
+      };
+      setAdminLoginError(messages[error.code] || '申請失敗，請稍後再試');
+    } finally {
+      registrationInProgress.current = false;
     }
   }
 
@@ -1383,6 +1460,20 @@ export default function BoothBookingApp() {
     } catch (error) {
       console.error('夥伴帳號儲存失敗', error);
       window.alert('夥伴帳號資料儲存失敗，請確認 UID 是否正確。');
+    }
+  }
+
+  async function approvePartnerRequest(request, displayName) {
+    if (!displayName) return;
+    try {
+      const profile = await approveAccessRequest(request, displayName);
+      await upsertStaffAccount(profile);
+      setAccessRequests((items) => items.map((item) => (
+        item.uid === request.uid ? { ...item, displayName, status: 'approved' } : item
+      )));
+    } catch (error) {
+      console.error('夥伴申請核准失敗', error);
+      window.alert('核准失敗，請稍後再試。');
     }
   }
 
@@ -1809,6 +1900,29 @@ export default function BoothBookingApp() {
     return { total, paid, unpaid };
   }, [financeGroups]);
 
+  const sessionIncomeGroups = useMemo(() => {
+    const prefix = `${viewYear}-${pad2(viewMonth)}`;
+    const map = {};
+    bookings
+      .filter((b) => b.category !== 'rentOut' && b.date && b.date.startsWith(prefix))
+      .forEach((b) => {
+        const key = b.category === 'borrowed' ? '外借場收入' : '自家場收入';
+        if (!map[key]) map[key] = { items: [], total: 0, paid: 0, unpaid: 0 };
+        const amount = computeAmount(b);
+        map[key].items.push({ ...b, amount });
+        map[key].total += amount;
+        if (b.paymentStatus === 'paid') map[key].paid += amount; else map[key].unpaid += amount;
+      });
+    Object.values(map).forEach((g) => g.items.sort((a, b) => a.date.localeCompare(b.date)));
+    return map;
+  }, [bookings, viewYear, viewMonth]);
+
+  const sessionIncomeOverall = useMemo(() => {
+    let total = 0, paid = 0, unpaid = 0;
+    Object.values(sessionIncomeGroups).forEach((g) => { total += g.total; paid += g.paid; unpaid += g.unpaid; });
+    return { total, paid, unpaid };
+  }, [sessionIncomeGroups]);
+
   const hostWageBookings = useMemo(() => {
     const prefix = `${viewYear}-${pad2(viewMonth)}`;
     return bookings.filter((b) => b.category !== 'rentOut' && b.date && b.date.startsWith(prefix));
@@ -1846,6 +1960,15 @@ export default function BoothBookingApp() {
   function exportFinanceCsv() {
     const rows = [['類別', '對象', '日期', '劇本/活動', '包廂或場地', '金額', '狀態']];
 
+    Object.keys(sessionIncomeGroups).forEach((categoryLabel) => {
+      const g = sessionIncomeGroups[categoryLabel];
+      g.items.forEach((item) => {
+        const roomLabel = item.category === 'borrowed' ? item.venueName : ((rooms.find((r) => r.id === item.roomId) || {}).code || '');
+        rows.push([categoryLabel, item.personName || '', item.date, item.activityName, roomLabel, item.amount, item.paymentStatus === 'paid' ? '已收款' : '未收款']);
+      });
+      rows.push([categoryLabel, '', '', '小計', '', g.total, '']);
+    });
+
     Object.keys(financeGroups).sort((a, b) => a.localeCompare(b, 'zh-Hant')).forEach((name) => {
       const g = financeGroups[name];
       g.items.forEach((item) => {
@@ -1863,6 +1986,10 @@ export default function BoothBookingApp() {
       });
       rows.push(['主持人薪資', name, '', '小計', '', g.total, '']);
     });
+
+    rows.push(['總結', '', '', '場次收入＋出租收入', '', sessionIncomeOverall.total + financeOverall.total, '']);
+    rows.push(['總結', '', '', '主持人／NPC 薪資', '', hostWageOverall.total, '']);
+    rows.push(['總結', '', '', '收支餘額', '', sessionIncomeOverall.total + financeOverall.total - hostWageOverall.total, '']);
 
     const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -1901,13 +2028,21 @@ export default function BoothBookingApp() {
     { key: 'feedback', label: '帶場回饋', Icon: MessageSquare },
   ];
   if (currentProfile?.role === 'staff' || adminUnlocked) {
-    tabs.splice(2, 0, { key: 'host', label: '我的場次與薪資', Icon: Search });
+    tabs.splice(2, 0, {
+      key: 'host',
+      label: adminUnlocked ? '主持人總覽' : '我的場次與薪資',
+      Icon: adminUnlocked ? Users : Search,
+    });
   }
   if (adminUnlocked) {
     tabs.push({ key: 'pending', label: '待確認', Icon: Inbox, badge: pendingActive.length });
-    tabs.push({ key: 'hostOverview', label: '主持人總覽', Icon: Users });
     tabs.push({ key: 'finance', label: '金額總覽', Icon: Wallet });
-    tabs.push({ key: 'staff', label: '夥伴帳號', Icon: Key });
+    tabs.push({
+      key: 'staff',
+      label: '夥伴帳號',
+      Icon: Key,
+      badge: accessRequests.filter((item) => item.status === 'pending').length,
+    });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
@@ -1939,22 +2074,41 @@ export default function BoothBookingApp() {
               </button>
             ) : showPinBox ? (
               <div className="pin-box">
+                {registerMode && (
+                  <input
+                    type="text"
+                    placeholder="夥伴姓名"
+                    value={registerName}
+                    onChange={(e) => { setRegisterName(e.target.value); setAdminLoginError(''); }}
+                    autoFocus
+                  />
+                )}
                 <input
                   type="email"
                   placeholder="帳號 Email"
                   value={adminEmail}
                   onChange={(e) => { setAdminEmail(e.target.value); setAdminLoginError(''); }}
-                  autoFocus
+                  autoFocus={!registerMode}
                 />
                 <input
                   type="password"
                   placeholder="登入密碼"
                   value={adminPassword}
                   onChange={(e) => { setAdminPassword(e.target.value); setAdminLoginError(''); }}
-                  onKeyDown={(e) => { if (e.key === 'Enter') handleUnlock(); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') (registerMode ? handleRegister() : handleUnlock()); }}
                 />
-                <button type="button" className="btn-primary small" onClick={handleUnlock}>登入</button>
+                <button type="button" className="btn-primary small" onClick={registerMode ? handleRegister : handleUnlock}>
+                  {registerMode ? '送出申請' : '登入'}
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost small"
+                  onClick={() => { setRegisterMode((value) => !value); setAdminLoginError(''); setRegisterMessage(''); }}
+                >
+                  {registerMode ? '返回登入' : '第一次使用｜申請帳號'}
+                </button>
                 {adminLoginError && <span className="pin-error">{adminLoginError}</span>}
+                {registerMessage && <span className="register-success">{registerMessage}</span>}
               </div>
             ) : (
               <button type="button" className="lock-btn" onClick={() => setShowPinBox(true)}>
@@ -2255,7 +2409,7 @@ export default function BoothBookingApp() {
           </section>
         )}
 
-        {tab === 'host' && (
+        {tab === 'host' && !adminUnlocked && (
           <section>
             <h2>主持人查詢</h2>
             {getText('host_hint') && <p className="hint">{getText('host_hint')}</p>}
@@ -2263,6 +2417,7 @@ export default function BoothBookingApp() {
               <Search size={16} />
               <select
                 value={hostQuery}
+                disabled={isStaffSession}
                 onChange={(e) => {
                   setHostQuery(e.target.value);
                   setPwInput('');
@@ -2462,7 +2617,7 @@ export default function BoothBookingApp() {
           </section>
         )}
 
-        {tab === 'hostOverview' && adminUnlocked && (
+        {tab === 'host' && adminUnlocked && (
           <section>
             <h2>主持人總覽</h2>
             <p className="hint">不需要密碼，這裡可以一次看到每位主持人／NPC的所有場次，點開姓名就能展開，金額也可以直接在這裡切換已給付狀態。</p>
@@ -2481,27 +2636,37 @@ export default function BoothBookingApp() {
                 <details key={name} className="host-overview-block">
                   <summary>{name}（即將到來 {data.upcoming.length} 筆{hostOverviewShowPast ? `，過去 ${data.past.length} 筆` : ''}）</summary>
                   {data.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
-                  {data.upcoming.map((b) => (
-                    <SessionCard
-                      key={b.id} booking={b} rooms={rooms} adminUnlocked
-                      showMoney viewerName={name}
-                      onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
-                      onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
-                      confirmingDelete={confirmDeleteId === b.id}
-                      onConfirmDelete={handleDelete}
-                      onCancelDelete={() => setConfirmDeleteId(null)}
-                    />
+                  {groupByMonth(data.upcoming).map((group) => (
+                    <div className="staff-month-group" key={`${name}-upcoming-${group.monthKey}`}>
+                      <div className="staff-month-heading">{group.label}</div>
+                      {group.bookings.map((b) => (
+                        <SessionCard
+                          key={b.id} booking={b} rooms={rooms} adminUnlocked showDate
+                          showMoney viewerName={name}
+                          onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
+                          onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
+                          confirmingDelete={confirmDeleteId === b.id}
+                          onConfirmDelete={handleDelete}
+                          onCancelDelete={() => setConfirmDeleteId(null)}
+                        />
+                      ))}
+                    </div>
                   ))}
-                  {hostOverviewShowPast && data.past.map((b) => (
-                    <SessionCard
-                      key={b.id} booking={b} rooms={rooms} adminUnlocked
-                      showMoney viewerName={name}
-                      onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
-                      onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
-                      confirmingDelete={confirmDeleteId === b.id}
-                      onConfirmDelete={handleDelete}
-                      onCancelDelete={() => setConfirmDeleteId(null)}
-                    />
+                  {hostOverviewShowPast && groupByMonth(data.past, true).map((group) => (
+                    <div className="staff-month-group" key={`${name}-past-${group.monthKey}`}>
+                      <div className="staff-month-heading">{group.label}・過去場次</div>
+                      {group.bookings.map((b) => (
+                        <SessionCard
+                          key={b.id} booking={b} rooms={rooms} adminUnlocked showDate
+                          showMoney viewerName={name}
+                          onEdit={openEdit} onDeleteAsk={setConfirmDeleteId}
+                          onTogglePay={togglePayment} onToggleHostWage={toggleHostWage}
+                          confirmingDelete={confirmDeleteId === b.id}
+                          onConfirmDelete={handleDelete}
+                          onCancelDelete={() => setConfirmDeleteId(null)}
+                        />
+                      ))}
+                    </div>
                   ))}
                 </details>
               );
@@ -2511,13 +2676,39 @@ export default function BoothBookingApp() {
 
         {tab === 'finance' && adminUnlocked && (
           <section>
-            <h2>租場金額總覽</h2>
+            <h2>金額總覽</h2>
             {getText('finance_hint') && <p className="hint">{getText('finance_hint')}</p>}
             <MonthNav year={viewYear} month={viewMonth} onPrev={prevMonth} onNext={nextMonth} />
 
             <button type="button" className="btn-ghost wide export-btn" onClick={exportFinanceCsv}>
-              <Download size={15} /> 匯出本月財務報表（CSV，含出租收入＋主持人薪資）
+              <Download size={15} /> 匯出本月完整財務報表 CSV
             </button>
+
+            <div className="sub-heading">本月收支摘要</div>
+            <div className="stat-row">
+              <div className="stat-box paid"><div className="stat-label">總收入</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total + financeOverall.total)}</div></div>
+              <div className="stat-box unpaid"><div className="stat-label">主持人／NPC 薪資</div><div className="stat-value">{formatMoney(hostWageOverall.total)}</div></div>
+              <div className="stat-box"><div className="stat-label">收支餘額</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total + financeOverall.total - hostWageOverall.total)}</div></div>
+            </div>
+
+            <div className="sub-heading">自家場／外借場收入</div>
+            <div className="stat-row">
+              <div className="stat-box"><div className="stat-label">本月應收合計</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total)}</div></div>
+              <div className="stat-box paid"><div className="stat-label">已收</div><div className="stat-value">{formatMoney(sessionIncomeOverall.paid)}</div></div>
+              <div className="stat-box unpaid"><div className="stat-label">未收</div><div className="stat-value">{formatMoney(sessionIncomeOverall.unpaid)}</div></div>
+            </div>
+            {Object.keys(sessionIncomeGroups).length === 0 && <div className="empty-state"><Wallet size={28} /><p>這個月沒有自家場或外借場</p></div>}
+            {Object.entries(sessionIncomeGroups).map(([label, group]) => (
+              <div key={label} className="finance-group">
+                <div className="finance-group-head"><span className="finance-name">{label}</span><span className="finance-subtotal">{formatMoney(group.total)}</span></div>
+                {group.items.map((item) => (
+                  <div key={item.id} className="finance-row">
+                    <div className="finance-row-left"><span className="finance-date">{formatDateShort(item.date)}</span><span className="finance-activity">{item.activityName}</span></div>
+                    <div className="finance-row-right"><span className="finance-fee">{formatMoney(item.amount)}</span><PaymentChip status={item.paymentStatus} clickable onClick={() => togglePayment(item.id)} /></div>
+                  </div>
+                ))}
+              </div>
+            ))}
 
             <div className="sub-heading">出租收入－依夥伴／單位統計</div>
             <div className="stat-row">
@@ -2615,7 +2806,22 @@ export default function BoothBookingApp() {
         {tab === 'staff' && adminUnlocked && (
           <section>
             <h2>夥伴帳號管理</h2>
-            <p className="hint">先到 Firebase Authentication 建立 Email／密碼帳號，再把該帳號的 User UID 貼到這裡。夥伴登入後只能讀取自己的場次與薪資。</p>
+            <p className="hint">夥伴可在網站自行申請帳號並驗證 Email。你只要在下方選擇對應的既有人員並核准，系統就會自動綁定 UID 與建立個人場次副本。</p>
+
+            <div className="sub-heading">待核准帳號申請</div>
+            {accessRequests.filter((item) => item.status === 'pending').length === 0 && (
+              <div className="empty-state small">目前沒有待核准的帳號</div>
+            )}
+            {accessRequests.filter((item) => item.status === 'pending').map((request) => (
+              <PendingAccessRequest
+                key={request.uid}
+                request={request}
+                names={allKnownNames}
+                onApprove={approvePartnerRequest}
+              />
+            ))}
+
+            <div className="sub-heading">已建立的夥伴帳號</div>
 
             <div className="backup-box">
               <div>
@@ -2990,12 +3196,14 @@ const baseStyles = `
   padding: 7px 12px; border-radius: 999px; font-size: 0.82rem; cursor: pointer;
 }
 .lock-btn.unlocked { border-color: #D6677C; color: #D6677C; background: #FCE9EC; }
-.pin-box { display: flex; align-items: center; gap: 6px; position: relative; }
+.pin-box { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; position: relative; max-width: 620px; }
 .pin-box input {
-  width: 90px; background: #FFFFFF; border: 1px solid #E3AEB8; border-radius: 6px;
+  width: 140px; background: #FFFFFF; border: 1px solid #E3AEB8; border-radius: 6px;
   padding: 6px 8px; color: #5B4032; font-size: 0.85rem;
 }
 .pin-error { position: absolute; top: 100%; right: 0; font-size: 0.72rem; color: #C2693F; margin-top: 4px; }
+.register-success { flex-basis: 100%; text-align: right; font-size: 0.75rem; color: #4F8464; }
+.access-request-row { grid-template-columns: 1.2fr 1.2fr 1fr auto; }
 
 .tabs {
   display: flex; gap: 8px; padding: 14px 16px; overflow-x: auto;

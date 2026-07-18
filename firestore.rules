@@ -22,6 +22,7 @@ service cloud.firestore {
 
     function isStaffOwner(uid) {
       return isOwner(uid)
+        && request.auth.token.email_verified == true
         && exists(/databases/$(database)/documents/profiles/$(request.auth.uid))
         && profile().data.role == 'staff';
     }
@@ -76,6 +77,21 @@ service cloud.firestore {
     match /profiles/{uid} {
       allow read: if isOwner(uid) || isAdmin();
       allow write: if isAdmin();
+    }
+
+    match /accessRequests/{uid} {
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasOnly([
+          'uid', 'email', 'requestedName', 'status', 'submittedAt'
+        ])
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.requestedName is string
+        && request.resource.data.requestedName.size() > 0
+        && request.resource.data.requestedName.size() <= 100
+        && request.resource.data.status == 'pending';
+      allow read: if isOwner(uid) || isAdmin();
+      allow update, delete: if isAdmin();
     }
 
     match /staffViews/{uid}/bookings/{bookingId} {

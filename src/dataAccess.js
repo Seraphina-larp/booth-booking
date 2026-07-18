@@ -44,11 +44,12 @@ export async function loadProfile(uid) {
 }
 
 export async function loadAdminData() {
-  const [bookingSnap, applicationSnap, feedbackSnap, staffSnap, privateConfigSnap] = await Promise.all([
+  const [bookingSnap, applicationSnap, feedbackSnap, staffSnap, accessRequestSnap, privateConfigSnap] = await Promise.all([
     getDocs(collection(db, 'bookings')),
     getDocs(collection(db, 'applications')),
     getDocs(collection(db, 'feedback')),
     getDocs(collection(db, 'staffProfiles')),
+    getDocs(collection(db, 'accessRequests')),
     getDoc(doc(db, 'privateConfig', 'app')),
   ]);
   const config = privateConfigSnap.exists() ? privateConfigSnap.data() : {};
@@ -57,6 +58,7 @@ export async function loadAdminData() {
     pending: applicationSnap.docs.map((item) => ({ id: item.id, ...item.data() })),
     feedback: feedbackSnap.docs.map((item) => ({ id: item.id, ...item.data() })),
     staffProfiles: staffSnap.docs.map((item) => ({ uid: item.id, ...item.data() })),
+    accessRequests: accessRequestSnap.docs.map((item) => ({ uid: item.id, ...item.data() })),
     reminderLog: config.reminderLog || {},
     syncConfig: config.syncConfig || {},
   };
@@ -68,23 +70,46 @@ export async function loadStaffBookings(uid) {
 }
 
 function staffViewFor(booking, staffUid, staffName) {
-  const matchingHosts = (booking.hosts || []).filter((host) => host.staffUid === staffUid);
   const isRentalPartner = booking.rentalPartnerUid === staffUid;
   return {
     ...pick(booking, [
       'id', 'category', 'date', 'roomId', 'venueName', 'activityName', 'slots', 'slot',
       'timeStart', 'timeEnd', 'hostNote', 'notes', 'paymentStatus',
     ]),
-    personName: isRentalPartner ? (booking.personName || staffName || '') : '',
-    hosts: matchingHosts.map((host) => ({ ...host })),
-    ownAmount: isRentalPartner ? (booking.ownAmount ?? '') : '',
-    fixedRate: isRentalPartner ? (booking.fixedRate ?? '') : '',
-    hourlyRate: isRentalPartner ? (booking.hourlyRate ?? '') : '',
-    hours: isRentalPartner ? (booking.hours ?? '') : '',
-    boxOffice: isRentalPartner ? (booking.boxOffice ?? '') : '',
-    percent: isRentalPartner ? (booking.percent ?? '') : '',
-    manualAmount: isRentalPartner ? (booking.manualAmount ?? '') : '',
+    personName: booking.personName || '',
+    hosts: (booking.hosts || []).map((host) => ({
+      id: host.id || '',
+      name: host.name || '',
+      role: host.role || '',
+      ...(host.staffUid === staffUid ? { wage: host.wage ?? '', wagePaid: host.wagePaid || 'unpaid' } : {}),
+    })),
+    feeType: isRentalPartner ? (booking.feeType ?? '') : '',
+    feeRate: isRentalPartner ? (booking.feeRate ?? '') : '',
+    feeHours: isRentalPartner ? (booking.feeHours ?? '') : '',
+    feeRevenue: isRentalPartner ? (booking.feeRevenue ?? '') : '',
+    feePercentage: isRentalPartner ? (booking.feePercentage ?? '') : '',
+    feeManualAmount: isRentalPartner ? (booking.feeManualAmount ?? '') : '',
   };
+}
+
+export async function submitAccessRequest(request) {
+  await setDoc(doc(db, 'accessRequests', request.uid), request);
+}
+
+export async function approveAccessRequest(request, displayName) {
+  const profile = {
+    uid: request.uid,
+    displayName,
+    email: request.email || '',
+  };
+  await saveStaffProfile(profile);
+  await setDoc(doc(db, 'accessRequests', request.uid), {
+    ...request,
+    displayName,
+    status: 'approved',
+    approvedAt: new Date().toISOString(),
+  });
+  return profile;
 }
 
 export async function saveBookingSecure(booking, previousStaffUids = []) {
