@@ -37,7 +37,7 @@ service cloud.firestore {
     }
 
     match /applications/{applicationId} {
-      allow create: if
+      allow create: if isAdmin() || (
         request.resource.data.keys().hasOnly([
           'id', 'partnerName', 'contact', 'preferredDate', 'preferredRoomId',
           'preferredSlot', 'preferredTimeStart', 'preferredTimeEnd',
@@ -52,12 +52,13 @@ service cloud.firestore {
         && request.resource.data.activityName is string
         && request.resource.data.activityName.size() <= 200
         && request.resource.data.notes is string
-        && request.resource.data.notes.size() <= 2000;
+        && request.resource.data.notes.size() <= 2000
+      );
       allow read, update, delete: if isAdmin();
     }
 
     match /feedback/{feedbackId} {
-      allow create: if
+      allow create: if isAdmin() || (
         request.resource.data.keys().hasOnly([
           'id', 'hostName', 'activityName', 'feedbackType', 'content',
           'submittedAt', 'status'
@@ -67,7 +68,8 @@ service cloud.firestore {
         && request.resource.data.hostName is string
         && request.resource.data.hostName.size() <= 100
         && request.resource.data.content is string
-        && request.resource.data.content.size() <= 4000;
+        && request.resource.data.content.size() <= 4000
+      );
       allow read, update, delete: if isAdmin();
     }
 

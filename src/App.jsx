@@ -1332,6 +1332,7 @@ export default function BoothBookingApp() {
     setMigrationState('running');
     try {
       const legacy = await loadLegacyData();
+      legacy['rooms-config'] = legacy['rooms-config'] || rooms || ROOMS_DEFAULT;
       await migrateLegacyData(legacy);
       const data = await loadAdminData();
       setRooms(legacy['rooms-config'] || ROOMS_DEFAULT);
