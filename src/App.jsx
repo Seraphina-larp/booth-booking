@@ -1051,18 +1051,21 @@ export default function BoothBookingApp() {
 
   function persistBookings(next) {
     const previous = bookings;
-    const normalized = next.map((booking) => ({
-      ...booking,
-      rentalPartnerUid: booking.rentalPartnerUid || (
+    const normalized = next.map((booking) => {
+      const rentalPartnerUid = booking.rentalPartnerUid || (
         booking.category === 'rentOut'
           ? staffProfiles.find((profile) => profile.displayName === booking.personName)?.uid
-          : undefined
-      ),
-      hosts: (booking.hosts || []).map((host) => ({
-        ...host,
-        staffUid: host.staffUid || staffProfiles.find((profile) => profile.displayName === host.name)?.uid,
-      })),
-    }));
+          : null
+      );
+      return {
+        ...booking,
+        ...(rentalPartnerUid ? { rentalPartnerUid } : {}),
+        hosts: (booking.hosts || []).map((host) => {
+          const staffUid = host.staffUid || staffProfiles.find((profile) => profile.displayName === host.name)?.uid;
+          return staffUid ? { ...host, staffUid } : host;
+        }),
+      };
+    });
     setBookings(normalized);
     if (!adminUnlocked) return;
     normalized.forEach((booking) => {
@@ -1360,15 +1363,16 @@ export default function BoothBookingApp() {
         const exists = items.some((item) => item.uid === profile.uid);
         return exists ? items.map((item) => (item.uid === profile.uid ? profile : item)) : [...items, profile];
       });
-      const linked = bookings.map((booking) => ({
-        ...booking,
-        rentalPartnerUid: booking.category === 'rentOut' && booking.personName === profile.displayName
-          ? profile.uid
-          : booking.rentalPartnerUid,
-        hosts: (booking.hosts || []).map((host) => (
-          host.name === profile.displayName ? { ...host, staffUid: profile.uid } : host
-        )),
-      }));
+      const linked = bookings.map((booking) => {
+        const shouldLinkRental = booking.category === 'rentOut' && booking.personName === profile.displayName;
+        return {
+          ...booking,
+          ...(shouldLinkRental ? { rentalPartnerUid: profile.uid } : {}),
+          hosts: (booking.hosts || []).map((host) => (
+            host.name === profile.displayName ? { ...host, staffUid: profile.uid } : host
+          )),
+        };
+      });
       persistBookings(linked);
     } catch (error) {
       console.error('夥伴帳號儲存失敗', error);
