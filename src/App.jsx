@@ -1039,7 +1039,7 @@ export default function BoothBookingApp() {
     (async () => {
       try {
         const publicData = await loadPublicData();
-        setRooms(publicData.rooms || ROOMS_DEFAULT);
+        setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
         setBookings(publicData.bookings || []);
         setPageTexts(publicData.pageTexts || {});
       } catch (error) {
@@ -1259,7 +1259,7 @@ export default function BoothBookingApp() {
       if (!user) {
         try {
           const publicData = await loadPublicData();
-          setRooms(publicData.rooms || ROOMS_DEFAULT);
+          setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
           setBookings(publicData.bookings || []);
           setPageTexts(publicData.pageTexts || {});
         } catch (error) {
@@ -1332,7 +1332,9 @@ export default function BoothBookingApp() {
     setMigrationState('running');
     try {
       const legacy = await loadLegacyData();
-      legacy['rooms-config'] = legacy['rooms-config'] || rooms || ROOMS_DEFAULT;
+      legacy['rooms-config'] = Array.isArray(legacy['rooms-config']) && legacy['rooms-config'].length
+        ? legacy['rooms-config']
+        : (Array.isArray(rooms) && rooms.length ? rooms : ROOMS_DEFAULT);
       await migrateLegacyData(legacy);
       const data = await loadAdminData();
       setRooms(legacy['rooms-config'] || ROOMS_DEFAULT);
