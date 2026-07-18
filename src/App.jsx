@@ -506,7 +506,7 @@ function MonthCalendarGrid({ year, month, bookingsByDate, selectedDate, onSelect
 /* --------------------------------- 場次卡片 --------------------------------- */
 
 function SessionCard({
-  booking, rooms, adminUnlocked, showMoney, viewerName,
+  booking, rooms, adminUnlocked, showMoney, viewerName, showDate = false,
   onEdit, onDeleteAsk, onTogglePay, onToggleHostWage,
   confirmingDelete, onConfirmDelete, onCancelDelete,
 }) {
@@ -522,6 +522,12 @@ function SessionCard({
 
   return (
     <div className="ticket" style={{ borderLeftColor: meta.color }}>
+      {showDate && (
+        <div className="session-card-date">
+          <CalendarDays size={14} />
+          <strong>{formatDateShort(booking.date)}</strong>
+        </div>
+      )}
       <div className="ticket-row">
         <div className="slot-time">
           {getSlotsList(booking).map((sk) => (
@@ -1708,6 +1714,31 @@ export default function BoothBookingApp() {
     return { upcoming, past };
   }, [hostQuery, bookings]);
 
+  function groupByMonth(items, descending = false) {
+    const groups = new Map();
+    items.forEach((booking) => {
+      const monthKey = (booking.date || '').slice(0, 7);
+      if (!groups.has(monthKey)) groups.set(monthKey, []);
+      groups.get(monthKey).push(booking);
+    });
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => descending ? b.localeCompare(a) : a.localeCompare(b))
+      .map(([monthKey, monthBookings]) => ({
+        monthKey,
+        label: monthKey ? `${Number(monthKey.slice(0, 4))} 年 ${Number(monthKey.slice(5, 7))} 月` : '未設定月份',
+        bookings: monthBookings,
+      }));
+  }
+
+  const upcomingHostMonths = useMemo(
+    () => groupByMonth(hostMatches?.upcoming || []),
+    [hostMatches],
+  );
+  const pastHostMonths = useMemo(
+    () => groupByMonth(hostMatches?.past || [], true),
+    [hostMatches],
+  );
+
   const isStaffSession = currentProfile?.role === 'staff';
   const isUnlocked = isStaffSession || !!(unlockedFor && hostQuery.trim() && unlockedFor === hostQuery.trim());
 
@@ -2268,26 +2299,43 @@ export default function BoothBookingApp() {
                   </div>
                 ) : (
                   <>
-                    <div className="sub-heading">即將到來（{hostMatches.upcoming.length}）</div>
-                    {hostMatches.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
-                    {hostMatches.upcoming.map((b) => (
-                      <SessionCard
-                        key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
-                        showMoney={isUnlocked} viewerName={hostQuery.trim()}
-                        onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
-                      />
-                    ))}
+                    <details className="staff-session-section" open>
+                      <summary>即將到來（{hostMatches.upcoming.length} 場）</summary>
+                      <div className="staff-session-section-body">
+                        {hostMatches.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
+                        {upcomingHostMonths.map((group) => (
+                          <div className="staff-month-group" key={`upcoming-${group.monthKey}`}>
+                            <div className="staff-month-heading">{group.label}</div>
+                            {group.bookings.map((b) => (
+                              <SessionCard
+                                key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
+                                showDate showMoney={isUnlocked} viewerName={hostQuery.trim()}
+                                onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
 
-                    <button type="button" className="btn-ghost small" onClick={() => setShowPast((s) => !s)}>
-                      {showPast ? '隱藏' : '顯示'}過去場次（{hostMatches.past.length}）
-                    </button>
-                    {showPast && hostMatches.past.map((b) => (
-                      <SessionCard
-                        key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
-                        showMoney={isUnlocked} viewerName={hostQuery.trim()}
-                        onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
-                      />
-                    ))}
+                    <details className="staff-session-section">
+                      <summary>過往場次（{hostMatches.past.length} 場）</summary>
+                      <div className="staff-session-section-body">
+                        {hostMatches.past.length === 0 && <div className="empty-state small">目前沒有可顯示的過往場次</div>}
+                        {pastHostMonths.map((group) => (
+                          <div className="staff-month-group" key={`past-${group.monthKey}`}>
+                            <div className="staff-month-heading">{group.label}</div>
+                            {group.bookings.map((b) => (
+                              <SessionCard
+                                key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
+                                showDate showMoney={isUnlocked} viewerName={hostQuery.trim()}
+                                onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   </>
                 )}
               </>
@@ -3169,6 +3217,42 @@ const baseStyles = `
 .host-search input { background: transparent; border: none; color: #5B4032; flex: 1; font-size: 0.9rem; }
 .host-search input:focus { outline: none; }
 .host-search svg { color: #A98C7A; }
+.session-card-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+  color: #8B5D50;
+  font-size: 0.88rem;
+}
+.staff-session-section {
+  margin: 14px 0;
+  border: 1px solid #E8CCC7;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.42);
+}
+.staff-session-section > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 13px 16px;
+  color: #9F4F61;
+  font-weight: 800;
+  background: rgba(255,242,239,0.8);
+}
+.staff-session-section > summary::-webkit-details-marker { display: none; }
+.staff-session-section > summary::after { content: '＋'; float: right; }
+.staff-session-section[open] > summary::after { content: '－'; }
+.staff-session-section-body { padding: 12px; }
+.staff-month-group + .staff-month-group { margin-top: 18px; }
+.staff-month-heading {
+  margin: 3px 2px 9px;
+  color: #6E5045;
+  font-size: 0.9rem;
+  font-weight: 800;
+  border-bottom: 1px dashed #DFC3BD;
+  padding-bottom: 6px;
+}
 .sub-heading { color: #A98C7A; font-size: 0.82rem; margin: 10px 0 8px; }
 
 .pw-gate { background: #FFF3EA; border: 1px solid #F0DCDF; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
