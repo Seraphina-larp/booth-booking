@@ -4,9 +4,26 @@ import {
   ChevronLeft, ChevronRight, User, Wallet, CalendarDays,
   MapPin, Inbox, Send, Search, RotateCcw, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
 } from 'lucide-react';
-import { db, auth } from './firebase';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { auth } from './firebase';
 import { signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'firebase/auth';
+import {
+  deleteBookingSecure,
+  deleteStaffProfile,
+  loadAdminData,
+  loadLegacyData,
+  loadProfile,
+  loadPublicData,
+  loadStaffBookings,
+  migrateLegacyData,
+  saveApplication,
+  saveBookingSecure,
+  saveFeedback,
+  savePrivateConfig,
+  savePublicConfig,
+  saveStaffProfile,
+  submitApplication,
+  submitFeedback,
+} from './dataAccess';
 
 /* ---------------------------------- 常數 ---------------------------------- */
 
@@ -155,27 +172,6 @@ function copyText(text) {
     document.execCommand('copy');
     document.body.removeChild(ta);
   } catch (e) { /* ignore */ }
-}
-
-async function loadKey(key, fallback) {
-  try {
-    const ref = doc(db, 'appData', key);
-    const snap = await getDoc(ref);
-    if (snap.exists()) return snap.data().value;
-    return fallback;
-  } catch (e) {
-    console.error('讀取失敗', key, e);
-    return fallback;
-  }
-}
-
-async function saveKey(key, value) {
-  try {
-    const ref = doc(db, 'appData', key);
-    await setDoc(ref, { value });
-  } catch (e) {
-    console.error('儲存失敗', key, e);
-  }
 }
 
 /* --------------------------------- 資料匯入 --------------------------------- */
@@ -510,7 +506,7 @@ function MonthCalendarGrid({ year, month, bookingsByDate, selectedDate, onSelect
 /* --------------------------------- 場次卡片 --------------------------------- */
 
 function SessionCard({
-  booking, rooms, adminUnlocked, showMoney, viewerName,
+  booking, rooms, adminUnlocked, showMoney, viewerName, showDate = false,
   onEdit, onDeleteAsk, onTogglePay, onToggleHostWage,
   confirmingDelete, onConfirmDelete, onCancelDelete,
 }) {
@@ -526,6 +522,12 @@ function SessionCard({
 
   return (
     <div className="ticket" style={{ borderLeftColor: meta.color }}>
+      {showDate && (
+        <div className="session-card-date">
+          <CalendarDays size={14} />
+          <strong>{formatDateShort(booking.date)}</strong>
+        </div>
+      )}
       <div className="ticket-row">
         <div className="slot-time">
           {getSlotsList(booking).map((sk) => (
@@ -540,10 +542,12 @@ function SessionCard({
 
       <div className="activity-name">{booking.activityName || '（未填活動 / 劇本名稱）'}</div>
 
-      <div className="person-line">
-        <User size={13} />
-        <span>{personLabel}：{booking.personName || '未填'}</span>
-      </div>
+      {booking.personName && (
+        <div className="person-line">
+          <User size={13} />
+          <span>{personLabel}：{booking.personName}</span>
+        </div>
+      )}
 
       {booking.category === 'rentOut' && booking.hostNote && (
         <div className="person-line">
@@ -868,39 +872,46 @@ function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
   );
 }
 
-/* --------------------------------- 人員密碼管理 --------------------------------- */
+/* --------------------------------- 人員帳號管理 --------------------------------- */
 
-function StaffPasswordRow({ name, value, onSave, onDelete }) {
-  const [pw, setPw] = useState(value);
+function StaffAccountRow({ profile, onSave, onDelete }) {
+  const [displayName, setDisplayName] = useState(profile.displayName || '');
+  const [email, setEmail] = useState(profile.email || '');
+  const [accountUid, setAccountUid] = useState(profile.uid || '');
   const [saved, setSaved] = useState(false);
   function handleSave() {
-    onSave(pw);
+    if (!displayName.trim() || !accountUid.trim()) return;
+    onSave({ uid: accountUid.trim(), displayName: displayName.trim(), email: email.trim() });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   }
   return (
     <div className="staff-row">
-      <span className="staff-name">{name}</span>
-      <input type="text" placeholder="設定密碼" value={pw} onChange={(e) => { setPw(e.target.value); setSaved(false); }} />
+      <input type="text" placeholder="顯示姓名" value={displayName} onChange={(e) => { setDisplayName(e.target.value); setSaved(false); }} />
+      <input type="email" placeholder="登入 Email" value={email} onChange={(e) => { setEmail(e.target.value); setSaved(false); }} />
+      <input type="text" placeholder="Firebase User UID" value={accountUid} onChange={(e) => { setAccountUid(e.target.value); setSaved(false); }} />
       <button type="button" className="btn-primary small" onClick={handleSave}>{saved ? '已儲存' : '儲存'}</button>
       <button type="button" className="icon-btn danger-outline" onClick={onDelete} aria-label="刪除"><Trash2 size={14} /></button>
     </div>
   );
 }
 
-function AddStaffForm({ onAdd }) {
+function AddStaffAccountForm({ onAdd }) {
   const [name, setName] = useState('');
-  const [pw, setPw] = useState('');
+  const [email, setEmail] = useState('');
+  const [accountUid, setAccountUid] = useState('');
   function handleAdd() {
-    if (!name.trim()) return;
-    onAdd(name.trim(), pw);
+    if (!name.trim() || !accountUid.trim()) return;
+    onAdd({ uid: accountUid.trim(), displayName: name.trim(), email: email.trim() });
     setName('');
-    setPw('');
+    setEmail('');
+    setAccountUid('');
   }
   return (
     <div className="staff-row add-row">
       <input type="text" placeholder="新增人員姓名" value={name} onChange={(e) => setName(e.target.value)} />
-      <input type="text" placeholder="設定密碼" value={pw} onChange={(e) => setPw(e.target.value)} />
+      <input type="email" placeholder="登入 Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <input type="text" placeholder="Firebase User UID" value={accountUid} onChange={(e) => setAccountUid(e.target.value)} />
       <button type="button" className="btn-primary small" onClick={handleAdd}><Plus size={13} /> 新增</button>
     </div>
   );
@@ -971,6 +982,7 @@ export default function BoothBookingApp() {
   const [bookings, setBookings] = useState([]);
   const [pending, setPending] = useState([]);
   const [staffDirectory, setStaffDirectory] = useState({});
+  const [staffProfiles, setStaffProfiles] = useState([]);
   const [feedbackList, setFeedbackList] = useState([]);
   const [reminderLog, setReminderLog] = useState({});
   const [syncConfig, setSyncConfig] = useState({ sheetName: '', lastSyncAt: '', lastSyncMessage: '' });
@@ -985,6 +997,8 @@ export default function BoothBookingApp() {
   const [adminPassword, setAdminPassword] = useState('');
   const [adminLoginError, setAdminLoginError] = useState('');
   const [adminUser, setAdminUser] = useState(null);
+  const [currentProfile, setCurrentProfile] = useState(null);
+  const [migrationState, setMigrationState] = useState('idle');
 
   const todayD = new Date();
   const [viewYear, setViewYear] = useState(todayD.getFullYear());
@@ -1029,54 +1043,144 @@ export default function BoothBookingApp() {
 
   useEffect(() => {
     (async () => {
-      const r = await loadKey('rooms-config', ROOMS_DEFAULT);
-      const b = await loadKey('bookings', null);
-      const p = await loadKey('pending-requests', null);
-      const sd = await loadKey('staff-directory', null);
-      const fb = await loadKey('host-feedback', null);
-      const rl = await loadKey('reminder-log', {});
-      const pt = await loadKey('page-texts', {});
-      const sc = await loadKey('sync-config', { sheetName: '', lastSyncAt: '', lastSyncMessage: '' });
-      setSyncConfig(sc || { sheetName: '', lastSyncAt: '', lastSyncMessage: '' });
-      setRooms(r);
-      if (b === null && p === null) {
-        const sb = seedBookings(r);
-        const sp = seedPending(r);
-        const ssd = seedStaffDirectory();
-        const sfb = seedFeedback();
-        setBookings(sb);
-        setPending(sp);
-        setStaffDirectory(ssd);
-        setFeedbackList(sfb);
-        setReminderLog({});
-        setPageTexts({});
-        saveKey('bookings', sb);
-        saveKey('pending-requests', sp);
-        saveKey('staff-directory', ssd);
-        saveKey('host-feedback', sfb);
-      } else {
-        setBookings(b || []);
-        setPending(p || []);
-        setStaffDirectory(sd || {});
-        setFeedbackList(fb || []);
-        setReminderLog(rl || {});
-        setPageTexts(pt || {});
+      try {
+        const publicData = await loadPublicData();
+        setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
+        setBookings(publicData.bookings || []);
+        setPageTexts(publicData.pageTexts || {});
+      } catch (error) {
+        console.error('公開資料載入失敗', error);
       }
       setLoading(false);
     })();
   }, []);
 
-  function persistBookings(next) { setBookings(next); saveKey('bookings', next); }
-  function persistPending(next) { setPending(next); saveKey('pending-requests', next); }
-  function persistStaff(next) { setStaffDirectory(next); saveKey('staff-directory', next); }
-  function persistFeedback(next) { setFeedbackList(next); saveKey('host-feedback', next); }
-  function persistReminderLog(next) { setReminderLog(next); saveKey('reminder-log', next); }
-  function persistPageTexts(next) { setPageTexts(next); saveKey('page-texts', next); }
+  function persistBookings(next) {
+    const previous = bookings;
+    const normalized = next.map((booking) => {
+      const rentalPartnerUid = booking.rentalPartnerUid || (
+        booking.category === 'rentOut'
+          ? staffProfiles.find((profile) => profile.displayName === booking.personName)?.uid
+          : null
+      );
+      return {
+        ...booking,
+        ...(rentalPartnerUid ? { rentalPartnerUid } : {}),
+        hosts: (booking.hosts || []).map((host) => {
+          const staffUid = host.staffUid || staffProfiles.find((profile) => profile.displayName === host.name)?.uid;
+          return staffUid ? { ...host, staffUid } : host;
+        }),
+      };
+    });
+    setBookings(normalized);
+    if (!adminUnlocked) return;
+    normalized.forEach((booking) => {
+      const old = previous.find((item) => item.id === booking.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(booking)) {
+        saveBookingSecure(booking, old?.staffUids || []).catch((error) => console.error('場次儲存失敗', error));
+      }
+    });
+    previous.filter((item) => !normalized.some((booking) => booking.id === item.id)).forEach((booking) => {
+      deleteBookingSecure(booking).catch((error) => console.error('場次刪除失敗', error));
+    });
+  }
+  function persistPending(next) {
+    setPending(next);
+    if (adminUnlocked) next.forEach((item) => saveApplication(item).catch((error) => console.error('申請儲存失敗', error)));
+  }
+  function persistStaff(next) { setStaffDirectory(next); }
+  function persistFeedback(next) {
+    setFeedbackList(next);
+    if (adminUnlocked) next.forEach((item) => saveFeedback(item).catch((error) => console.error('回饋儲存失敗', error)));
+  }
+  function persistReminderLog(next) {
+    setReminderLog(next);
+    if (adminUnlocked) savePrivateConfig({ reminderLog: next }).catch((error) => console.error('提醒紀錄儲存失敗', error));
+  }
+  function persistPageTexts(next) {
+    setPageTexts(next);
+    if (adminUnlocked) savePublicConfig(rooms, next).catch((error) => console.error('頁面文字儲存失敗', error));
+  }
   function getText(key) {
     const v = pageTexts[key];
     return (v === undefined || v === null) ? (DEFAULT_TEXTS[key] || '') : v;
   }
-  function persistSyncConfig(next) { setSyncConfig(next); saveKey('sync-config', next); }
+  function persistSyncConfig(next) {
+    setSyncConfig(next);
+    if (adminUnlocked) savePrivateConfig({ syncConfig: next }).catch((error) => console.error('同步設定儲存失敗', error));
+  }
+
+  function exportBackup() {
+    const backup = {
+      exportedAt: new Date().toISOString(),
+      version: 1,
+      data: {
+        rooms,
+        bookings,
+        pending,
+        staffDirectory,
+        feedbackList,
+        reminderLog,
+        pageTexts,
+        syncConfig,
+      },
+    };
+
+    const date = new Date().toISOString().slice(0, 10);
+    const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `booth-booking-backup-${date}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function importBackupFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const ok = window.confirm('確定要還原這份備份嗎？目前雲端資料會被備份內容覆蓋。');
+    if (!ok) {
+      e.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || '{}'));
+        const data = parsed.data || parsed;
+
+        if (!data.bookings || !data.staffDirectory) {
+          window.alert('這不是有效的 booth-booking 備份檔。');
+          return;
+        }
+
+        if (data.rooms) {
+          setRooms(data.rooms);
+          savePublicConfig(data.rooms, data.pageTexts || pageTexts);
+        }
+
+        persistBookings(data.bookings || []);
+        persistPending(data.pending || []);
+        persistStaff(data.staffDirectory || {});
+        persistFeedback(data.feedbackList || []);
+        persistReminderLog(data.reminderLog || {});
+        persistPageTexts(data.pageTexts || {});
+        persistSyncConfig(data.syncConfig || { sheetName: '', lastSyncAt: '', lastSyncMessage: '' });
+
+        window.alert('備份已還原完成。');
+      } catch (err) {
+        window.alert('還原失敗：備份檔格式不正確。');
+      } finally {
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(file);
+  }
 
   function buildSyncRows() {
     return bookings
@@ -1157,16 +1261,58 @@ export default function BoothBookingApp() {
   }
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setAdminUser(user);
-      setAdminUnlocked(!!user);
-      if (!user && ['pending', 'hostOverview', 'finance', 'staff', 'reminders', 'import', 'texts'].includes(tab)) {
+      setAdminUnlocked(false);
+      setCurrentProfile(null);
+      if (!user) {
+        try {
+          const publicData = await loadPublicData();
+          setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
+          setBookings(publicData.bookings || []);
+          setPageTexts(publicData.pageTexts || {});
+        } catch (error) {
+          console.error('公開資料重新載入失敗', error);
+        }
+        setPending([]);
+        setFeedbackList([]);
+        setStaffProfiles([]);
         setTab('overview');
+        setViewMode('calendar');
+        return;
       }
-      if (!user && viewMode === 'table') setViewMode('calendar');
+
+      try {
+        const profile = await loadProfile(user.uid);
+        if (!profile || !['admin', 'staff'].includes(profile.role)) {
+          setAdminLoginError('此帳號尚未設定後台權限，請聯絡管理者');
+          await signOut(auth);
+          return;
+        }
+        setCurrentProfile(profile);
+        if (profile.role === 'admin') {
+          const data = await loadAdminData();
+          setAdminUnlocked(true);
+          setBookings(data.bookings || []);
+          setPending(data.pending || []);
+          setFeedbackList(data.feedback || []);
+          setStaffProfiles(data.staffProfiles || []);
+          setReminderLog(data.reminderLog || {});
+          setSyncConfig(data.syncConfig || {});
+        } else {
+          const ownBookings = await loadStaffBookings(user.uid);
+          setBookings(ownBookings);
+          setHostQuery(profile.displayName || '');
+          setUnlockedFor(profile.displayName || '');
+          setTab('host');
+        }
+      } catch (error) {
+        console.error('登入權限載入失敗', error);
+        setAdminLoginError('無法載入帳號權限，請稍後再試');
+      }
     });
     return () => unsubscribe();
-  }, [tab, viewMode]);
+  }, []);
 
   async function handleUnlock() {
     try {
@@ -1186,6 +1332,68 @@ export default function BoothBookingApp() {
     setAdminPassword('');
     if (['pending', 'hostOverview', 'finance', 'staff', 'reminders', 'import', 'texts'].includes(tab)) setTab('overview');
     if (viewMode === 'table') setViewMode('calendar');
+  }
+
+  async function handleLegacyMigration() {
+    if (!adminUnlocked || migrationState === 'running') return;
+    const ok = window.confirm('要把舊版資料轉移到新的安全資料結構嗎？這不會刪除舊資料。');
+    if (!ok) return;
+    setMigrationState('running');
+    try {
+      const legacy = await loadLegacyData();
+      legacy['rooms-config'] = Array.isArray(legacy['rooms-config']) && legacy['rooms-config'].length
+        ? legacy['rooms-config']
+        : (Array.isArray(rooms) && rooms.length ? rooms : ROOMS_DEFAULT);
+      await migrateLegacyData(legacy);
+      const data = await loadAdminData();
+      setRooms(legacy['rooms-config'] || ROOMS_DEFAULT);
+      setPageTexts(legacy['page-texts'] || {});
+      setBookings(data.bookings || []);
+      setPending(data.pending || []);
+      setFeedbackList(data.feedback || []);
+      setReminderLog(data.reminderLog || {});
+      setSyncConfig(data.syncConfig || {});
+      setMigrationState('done');
+      window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
+    } catch (error) {
+      console.error('資料遷移失敗', error);
+      setMigrationState('error');
+      window.alert('資料轉移失敗，舊資料沒有被刪除，請保留畫面並聯絡協助。');
+    }
+  }
+
+  async function upsertStaffAccount(profile) {
+    try {
+      await saveStaffProfile(profile);
+      setStaffProfiles((items) => {
+        const exists = items.some((item) => item.uid === profile.uid);
+        return exists ? items.map((item) => (item.uid === profile.uid ? profile : item)) : [...items, profile];
+      });
+      const linked = bookings.map((booking) => {
+        const shouldLinkRental = booking.category === 'rentOut' && booking.personName === profile.displayName;
+        return {
+          ...booking,
+          ...(shouldLinkRental ? { rentalPartnerUid: profile.uid } : {}),
+          hosts: (booking.hosts || []).map((host) => (
+            host.name === profile.displayName ? { ...host, staffUid: profile.uid } : host
+          )),
+        };
+      });
+      persistBookings(linked);
+    } catch (error) {
+      console.error('夥伴帳號儲存失敗', error);
+      window.alert('夥伴帳號資料儲存失敗，請確認 UID 是否正確。');
+    }
+  }
+
+  async function removeStaffAccount(profile) {
+    if (!window.confirm(`確定移除 ${profile.displayName} 的後台權限嗎？`)) return;
+    try {
+      await deleteStaffProfile(profile.uid);
+      setStaffProfiles((items) => items.filter((item) => item.uid !== profile.uid));
+    } catch (error) {
+      console.error('夥伴帳號移除失敗', error);
+    }
   }
 
   function emptyBookingData(presetDate) {
@@ -1257,7 +1465,7 @@ export default function BoothBookingApp() {
     }));
   }
 
-  function submitRequest() {
+  async function submitRequest() {
     if (!reqForm.partnerName.trim() || !reqForm.contact.trim() || !reqForm.activityName.trim()) {
       setReqError('請填寫姓名／單位、聯絡方式與活動／劇本名稱');
       return;
@@ -1267,9 +1475,14 @@ export default function BoothBookingApp() {
       return;
     }
     setReqError('');
-    const next = [...pending, { ...reqForm, id: uid('pd'), status: 'pending', submittedAt: new Date().toISOString() }];
-    persistPending(next);
-    setReqSubmitted(true);
+    const application = { ...reqForm, id: uid('pd'), status: 'pending', submittedAt: new Date().toISOString() };
+    try {
+      await submitApplication(application);
+      setReqSubmitted(true);
+    } catch (error) {
+      console.error('申請送出失敗', error);
+      setReqError('目前無法送出申請，請稍後再試');
+    }
   }
   function resetReqForm() {
     setReqForm({ partnerName: '', contact: '', preferredDate: '', preferredRoomId: '', preferredSlot: '早', preferredTimeStart: '', preferredTimeEnd: '', activityName: '', estimatedHours: '', notes: '' });
@@ -1277,11 +1490,15 @@ export default function BoothBookingApp() {
     setReqSubmitted(false);
   }
 
-  function submitFeedback() {
+  async function submitFeedbackForm() {
     if (!feedbackForm.hostName.trim() || !feedbackForm.content.trim()) return;
-    const next = [...feedbackList, { ...feedbackForm, id: uid('fb'), submittedAt: new Date().toISOString(), status: 'new' }];
-    persistFeedback(next);
-    setFeedbackSubmitted(true);
+    const item = { ...feedbackForm, id: uid('fb'), submittedAt: new Date().toISOString(), status: 'new' };
+    try {
+      await submitFeedback(item);
+      setFeedbackSubmitted(true);
+    } catch (error) {
+      console.error('回饋送出失敗', error);
+    }
   }
   function resetFeedbackForm() {
     setFeedbackForm({ hostName: '', activityName: '', feedbackType: FEEDBACK_TYPES[0], content: '' });
@@ -1497,7 +1714,33 @@ export default function BoothBookingApp() {
     return { upcoming, past };
   }, [hostQuery, bookings]);
 
-  const isUnlocked = !!(unlockedFor && hostQuery.trim() && unlockedFor === hostQuery.trim());
+  function groupByMonth(items, descending = false) {
+    const groups = new Map();
+    items.forEach((booking) => {
+      const monthKey = (booking.date || '').slice(0, 7);
+      if (!groups.has(monthKey)) groups.set(monthKey, []);
+      groups.get(monthKey).push(booking);
+    });
+    return Array.from(groups.entries())
+      .sort(([a], [b]) => descending ? b.localeCompare(a) : a.localeCompare(b))
+      .map(([monthKey, monthBookings]) => ({
+        monthKey,
+        label: monthKey ? `${Number(monthKey.slice(0, 4))} 年 ${Number(monthKey.slice(5, 7))} 月` : '未設定月份',
+        bookings: monthBookings,
+      }));
+  }
+
+  const upcomingHostMonths = useMemo(
+    () => groupByMonth(hostMatches?.upcoming || []),
+    [hostMatches],
+  );
+  const pastHostMonths = useMemo(
+    () => groupByMonth(hostMatches?.past || [], true),
+    [hostMatches],
+  );
+
+  const isStaffSession = currentProfile?.role === 'staff';
+  const isUnlocked = isStaffSession || !!(unlockedFor && hostQuery.trim() && unlockedFor === hostQuery.trim());
 
   const actualHostNames = useMemo(() => {
     const set = new Set();
@@ -1655,14 +1898,16 @@ export default function BoothBookingApp() {
   const tabs = [
     { key: 'overview', label: '總覽', Icon: CalendarDays },
     { key: 'request', label: '我要租場', Icon: Send },
-    { key: 'host', label: '主持人查詢', Icon: Search },
     { key: 'feedback', label: '帶場回饋', Icon: MessageSquare },
   ];
+  if (currentProfile?.role === 'staff' || adminUnlocked) {
+    tabs.splice(2, 0, { key: 'host', label: '我的場次與薪資', Icon: Search });
+  }
   if (adminUnlocked) {
     tabs.push({ key: 'pending', label: '待確認', Icon: Inbox, badge: pendingActive.length });
     tabs.push({ key: 'hostOverview', label: '主持人總覽', Icon: Users });
     tabs.push({ key: 'finance', label: '金額總覽', Icon: Wallet });
-    tabs.push({ key: 'staff', label: '人員密碼', Icon: Key });
+    tabs.push({ key: 'staff', label: '夥伴帳號', Icon: Key });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
@@ -1688,22 +1933,22 @@ export default function BoothBookingApp() {
             <div className="subtitle">沙拉嘿喲 · 場次管理系統 </div>
           </div>
           <div className="lock-area">
-            {adminUnlocked ? (
+            {adminUser ? (
               <button type="button" className="lock-btn unlocked" onClick={handleLock}>
-                <Unlock size={14} /> 管理者模式
+                <Unlock size={14} /> {adminUnlocked ? '管理者模式' : `${currentProfile?.displayName || '夥伴'}｜登出`}
               </button>
             ) : showPinBox ? (
               <div className="pin-box">
                 <input
                   type="email"
-                  placeholder="管理員 Email"
+                  placeholder="帳號 Email"
                   value={adminEmail}
                   onChange={(e) => { setAdminEmail(e.target.value); setAdminLoginError(''); }}
                   autoFocus
                 />
                 <input
                   type="password"
-                  placeholder="管理員密碼"
+                  placeholder="登入密碼"
                   value={adminPassword}
                   onChange={(e) => { setAdminPassword(e.target.value); setAdminLoginError(''); }}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleUnlock(); }}
@@ -1713,7 +1958,7 @@ export default function BoothBookingApp() {
               </div>
             ) : (
               <button type="button" className="lock-btn" onClick={() => setShowPinBox(true)}>
-                <Lock size={14} /> 管理者解鎖
+                <Lock size={14} /> 夥伴／管理者登入
               </button>
             )}
           </div>
@@ -2054,26 +2299,43 @@ export default function BoothBookingApp() {
                   </div>
                 ) : (
                   <>
-                    <div className="sub-heading">即將到來（{hostMatches.upcoming.length}）</div>
-                    {hostMatches.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
-                    {hostMatches.upcoming.map((b) => (
-                      <SessionCard
-                        key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
-                        showMoney={isUnlocked} viewerName={hostQuery.trim()}
-                        onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
-                      />
-                    ))}
+                    <details className="staff-session-section" open>
+                      <summary>即將到來（{hostMatches.upcoming.length} 場）</summary>
+                      <div className="staff-session-section-body">
+                        {hostMatches.upcoming.length === 0 && <div className="empty-state small">目前沒有即將到來的場次</div>}
+                        {upcomingHostMonths.map((group) => (
+                          <div className="staff-month-group" key={`upcoming-${group.monthKey}`}>
+                            <div className="staff-month-heading">{group.label}</div>
+                            {group.bookings.map((b) => (
+                              <SessionCard
+                                key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
+                                showDate showMoney={isUnlocked} viewerName={hostQuery.trim()}
+                                onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
 
-                    <button type="button" className="btn-ghost small" onClick={() => setShowPast((s) => !s)}>
-                      {showPast ? '隱藏' : '顯示'}過去場次（{hostMatches.past.length}）
-                    </button>
-                    {showPast && hostMatches.past.map((b) => (
-                      <SessionCard
-                        key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
-                        showMoney={isUnlocked} viewerName={hostQuery.trim()}
-                        onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
-                      />
-                    ))}
+                    <details className="staff-session-section">
+                      <summary>過往場次（{hostMatches.past.length} 場）</summary>
+                      <div className="staff-session-section-body">
+                        {hostMatches.past.length === 0 && <div className="empty-state small">目前沒有可顯示的過往場次</div>}
+                        {pastHostMonths.map((group) => (
+                          <div className="staff-month-group" key={`past-${group.monthKey}`}>
+                            <div className="staff-month-heading">{group.label}</div>
+                            {group.bookings.map((b) => (
+                              <SessionCard
+                                key={b.id} booking={b} rooms={rooms} adminUnlocked={false}
+                                showDate showMoney={isUnlocked} viewerName={hostQuery.trim()}
+                                onEdit={() => {}} onDeleteAsk={() => {}} onTogglePay={() => {}} onToggleHostWage={() => {}}
+                              />
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
                   </>
                 )}
               </>
@@ -2142,7 +2404,7 @@ export default function BoothBookingApp() {
                   <textarea rows={3} placeholder="例如：結局信封不夠了、某個道具壞了、想加印新的線索卡⋯" value={feedbackForm.content} onChange={(e) => setFeedbackForm({ ...feedbackForm, content: e.target.value })} />
                 </div>
                 <div className="field span2">
-                  <button type="button" className="btn-primary wide" onClick={submitFeedback}>
+                  <button type="button" className="btn-primary wide" onClick={submitFeedbackForm}>
                     <Send size={15} /> 送出回饋
                   </button>
                 </div>
@@ -2352,22 +2614,41 @@ export default function BoothBookingApp() {
 
         {tab === 'staff' && adminUnlocked && (
           <section>
-            <h2>人員密碼管理</h2>
-            {getText('staff_hint') && <p className="hint">{getText('staff_hint')}</p>}
-            {allKnownNames.map((name) => (
-              <StaffPasswordRow
-                key={name}
-                name={name}
-                value={staffDirectory[name] || ''}
-                onSave={(pw) => persistStaff({ ...staffDirectory, [name]: pw })}
-                onDelete={() => {
-                  const next = { ...staffDirectory };
-                  delete next[name];
-                  persistStaff(next);
-                }}
+            <h2>夥伴帳號管理</h2>
+            <p className="hint">先到 Firebase Authentication 建立 Email／密碼帳號，再把該帳號的 User UID 貼到這裡。夥伴登入後只能讀取自己的場次與薪資。</p>
+
+            <div className="backup-box">
+              <div>
+                <strong>舊資料安全轉移</strong>
+                <p className="hint">第一次切換新版時執行一次。舊資料會保留，不會在轉移過程中刪除。</p>
+              </div>
+              <button type="button" className="btn-primary small" disabled={migrationState === 'running'} onClick={handleLegacyMigration}>
+                {migrationState === 'running' ? '轉移中…' : migrationState === 'done' ? '已完成轉移' : '開始轉移舊資料'}
+              </button>
+            </div>
+
+            <div className="backup-box">
+              <div>
+                <strong>資料備份與還原</strong>
+                <p className="hint">建議定期匯出備份。還原會覆蓋目前雲端資料，請確認檔案正確再執行。</p>
+              </div>
+              <div className="backup-actions">
+                <button type="button" className="btn-primary small" onClick={exportBackup}>匯出備份 JSON</button>
+                <label className="btn-ghost small file-label">
+                  匯入備份 JSON
+                  <input type="file" accept="application/json" onChange={importBackupFile} style={{ display: 'none' }} />
+                </label>
+              </div>
+            </div>
+            {staffProfiles.map((profile) => (
+              <StaffAccountRow
+                key={profile.uid}
+                profile={profile}
+                onSave={upsertStaffAccount}
+                onDelete={() => removeStaffAccount(profile)}
               />
             ))}
-            <AddStaffForm onAdd={(name, pw) => persistStaff({ ...staffDirectory, [name]: pw })} />
+            <AddStaffAccountForm onAdd={upsertStaffAccount} />
           </section>
         )}
 
@@ -2936,6 +3217,42 @@ const baseStyles = `
 .host-search input { background: transparent; border: none; color: #5B4032; flex: 1; font-size: 0.9rem; }
 .host-search input:focus { outline: none; }
 .host-search svg { color: #A98C7A; }
+.session-card-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+  color: #8B5D50;
+  font-size: 0.88rem;
+}
+.staff-session-section {
+  margin: 14px 0;
+  border: 1px solid #E8CCC7;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.42);
+}
+.staff-session-section > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 13px 16px;
+  color: #9F4F61;
+  font-weight: 800;
+  background: rgba(255,242,239,0.8);
+}
+.staff-session-section > summary::-webkit-details-marker { display: none; }
+.staff-session-section > summary::after { content: '＋'; float: right; }
+.staff-session-section[open] > summary::after { content: '－'; }
+.staff-session-section-body { padding: 12px; }
+.staff-month-group + .staff-month-group { margin-top: 18px; }
+.staff-month-heading {
+  margin: 3px 2px 9px;
+  color: #6E5045;
+  font-size: 0.9rem;
+  font-weight: 800;
+  border-bottom: 1px dashed #DFC3BD;
+  padding-bottom: 6px;
+}
 .sub-heading { color: #A98C7A; font-size: 0.82rem; margin: 10px 0 8px; }
 
 .pw-gate { background: #FFF3EA; border: 1px solid #F0DCDF; border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
@@ -3048,5 +3365,34 @@ const baseStyles = `
 
 :focus-visible { outline: 2px solid #D6677C; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.backup-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  margin: 12px 0 16px;
+  border: 1px dashed #d8b4c0;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.58);
+}
+.backup-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.file-label {
+  cursor: pointer;
+}
+@media (max-width: 768px) {
+  .backup-box {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .backup-actions {
+    flex-direction: column;
+  }
+}
 
 `;
