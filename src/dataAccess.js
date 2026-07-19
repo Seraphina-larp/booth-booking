@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   getDocs,
+  onSnapshot,
   setDoc,
   writeBatch,
 } from 'firebase/firestore';
@@ -62,6 +63,12 @@ export async function loadAdminData() {
     reminderLog: config.reminderLog || {},
     syncConfig: config.syncConfig || {},
   };
+}
+
+export function subscribeApplications(onChange, onError) {
+  return onSnapshot(collection(db, 'applications'), (snapshot) => {
+    onChange(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })));
+  }, onError);
 }
 
 export async function loadStaffBookings(uid) {

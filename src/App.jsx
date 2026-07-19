@@ -28,6 +28,7 @@ import {
   submitApplication,
   submitAccessRequest,
   submitFeedback,
+  subscribeApplications,
 } from './dataAccess';
 
 /* ---------------------------------- 常數 ---------------------------------- */
@@ -54,6 +55,7 @@ const CATEGORY_META = {
 };
 
 const FEEDBACK_TYPES = ['道具不足', '需要列印', '設備或場地問題', '其他建議'];
+const REJECTION_REASONS = ['該時段已滿', '包廂無法安排', '需要調整日期', '需要調整使用時數', '申請資訊不足', '其他'];
 
 const DEFAULT_TEXTS = {
   overview_hint: '',
@@ -695,6 +697,10 @@ function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
       setError('請選擇包廂');
       return;
     }
+    if (mode === 'approve' && data.category === 'rentOut' && computeFee(data) <= 0) {
+      setError('核准出租場前，請填寫正確的場地費用');
+      return;
+    }
     setError('');
     onSave(data);
   }
@@ -1037,6 +1043,8 @@ export default function BoothBookingApp() {
   const [modal, setModal] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [confirmRejectId, setConfirmRejectId] = useState(null);
+  const [rejectReason, setRejectReason] = useState(REJECTION_REASONS[0]);
+  const [customRejectReason, setCustomRejectReason] = useState('');
   const [confirmReset, setConfirmReset] = useState(false);
 
   const [reqForm, setReqForm] = useState({
@@ -1082,6 +1090,14 @@ export default function BoothBookingApp() {
       setLoading(false);
     })();
   }, []);
+
+  useEffect(() => {
+    if (!adminUnlocked) return undefined;
+    return subscribeApplications(
+      setPending,
+      (error) => console.error('即時申請載入失敗', error),
+    );
+  }, [adminUnlocked]);
 
   function persistBookings(next) {
     const previous = bookings;
@@ -1510,7 +1526,7 @@ export default function BoothBookingApp() {
     setModal({ mode: 'edit', data: { ...b, hosts, hostNote: b.hostNote || '', slots: getSlotsList(b), timeStart, timeEnd } });
   }
   function openApprove(request) {
-    const room = rooms.find((r) => r.id === request.preferredRoomId) || rooms[0];
+    const room = rooms.find((r) => r.id === request.preferredRoomId);
     setModal({
       mode: 'approve',
       pendingId: request.id,
@@ -1527,12 +1543,44 @@ export default function BoothBookingApp() {
   }
   function closeModal() { setModal(null); }
 
-  function handleSaveModal(data) {
+  async function sendLineDecision(applicationId, outcome, detail = {}) {
+    if (!adminUser || !applicationId) return { skipped: true };
+    const token = await adminUser.getIdToken();
+    const response = await fetch('/api/line-notify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ applicationId, outcome, ...detail }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || 'LINE 通知傳送失敗');
+    return result;
+  }
+
+  async function handleSaveModal(data) {
     const exists = bookings.some((b) => b.id === data.id);
     const next = exists ? bookings.map((b) => (b.id === data.id ? data : b)) : [...bookings, data];
     persistBookings(next);
     if (modal?.mode === 'approve' && modal.pendingId) {
-      persistPending(pending.map((p) => (p.id === modal.pendingId ? { ...p, status: 'approved' } : p)));
+      const approvedAt = new Date().toISOString();
+      persistPending(pending.map((p) => (p.id === modal.pendingId ? {
+        ...p, status: 'approved', approvedAt, approvedBookingId: data.id,
+      } : p)));
+      const room = rooms.find((item) => item.id === data.roomId);
+      try {
+        const result = await sendLineDecision(modal.pendingId, 'approved', {
+          booking: {
+            date: data.date,
+            timeStart: data.timeStart,
+            timeEnd: data.timeEnd,
+            activityName: data.activityName,
+            roomLabel: room ? `${room.code}．${room.name}` : '待確認',
+            fee: computeFee(data),
+          },
+        });
+        if (!result.skipped) window.alert('場次已建立，並已傳送 LINE 核准通知。');
+      } catch (error) {
+        window.alert(`場次已建立，但 ${error.message}`);
+      }
     }
     closeModal();
   }
@@ -1544,7 +1592,24 @@ export default function BoothBookingApp() {
     setTableDraft(nextDraft);
     setConfirmDeleteId(null);
   }
-  function handleReject(id) { persistPending(pending.map((p) => (p.id === id ? { ...p, status: 'rejected' } : p))); setConfirmRejectId(null); }
+  async function handleReject(id) {
+    const reason = rejectReason === '其他' ? customRejectReason.trim() : rejectReason;
+    if (!reason) {
+      window.alert('請填寫無法核准的原因。');
+      return;
+    }
+    const rejectedAt = new Date().toISOString();
+    persistPending(pending.map((p) => (p.id === id ? { ...p, status: 'rejected', rejectionReason: reason, rejectedAt } : p)));
+    setConfirmRejectId(null);
+    setRejectReason(REJECTION_REASONS[0]);
+    setCustomRejectReason('');
+    try {
+      const result = await sendLineDecision(id, 'rejected', { reason });
+      if (!result.skipped) window.alert('已拒絕申請，並傳送 LINE 通知。');
+    } catch (error) {
+      window.alert(`申請已標記為拒絕，但 ${error.message}`);
+    }
+  }
   function togglePayment(id) {
     persistBookings(bookings.map((b) => (b.id === id ? { ...b, paymentStatus: b.paymentStatus === 'paid' ? 'unpaid' : 'paid' } : b)));
   }
@@ -2580,6 +2645,7 @@ export default function BoothBookingApp() {
                   <span className="submitted-at">送出時間：{new Date(req.submittedAt).toLocaleString('zh-Hant-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                 </div>
                 <div className="activity-name">{req.activityName || '（未填活動名稱）'}</div>
+                {req.source === 'line' && <div className="line-source-tag">LINE 極速申請</div>}
                 <div className="person-line"><User size={13} /><span>申請人：{req.partnerName}</span></div>
                 <div className="person-line"><User size={13} /><span>聯絡方式：{req.contact}</span></div>
                 {req.preferredRoomId && <div className="person-line">想要的包廂：{(rooms.find((r) => r.id === req.preferredRoomId) || {}).code}．{(rooms.find((r) => r.id === req.preferredRoomId) || {}).name}</div>}
@@ -2588,10 +2654,25 @@ export default function BoothBookingApp() {
 
                 <div className="ticket-footer">
                   {confirmRejectId === req.id ? (
-                    <div className="confirm-inline">
-                      <span>確定拒絕此申請？</span>
-                      <button type="button" className="btn-ghost small" onClick={() => setConfirmRejectId(null)}>取消</button>
-                      <button type="button" className="btn-danger small" onClick={() => handleReject(req.id)}>確定拒絕</button>
+                    <div className="reject-panel">
+                      <label>
+                        <span>無法核准的原因</span>
+                        <select value={rejectReason} onChange={(e) => setRejectReason(e.target.value)}>
+                          {REJECTION_REASONS.map((reason) => <option key={reason} value={reason}>{reason}</option>)}
+                        </select>
+                      </label>
+                      {rejectReason === '其他' && (
+                        <input
+                          type="text"
+                          placeholder="請輸入原因"
+                          value={customRejectReason}
+                          onChange={(e) => setCustomRejectReason(e.target.value)}
+                        />
+                      )}
+                      <div className="confirm-inline">
+                        <button type="button" className="btn-ghost small" onClick={() => setConfirmRejectId(null)}>取消</button>
+                        <button type="button" className="btn-danger small" onClick={() => handleReject(req.id)}>確認拒絕並通知</button>
+                      </div>
                     </div>
                   ) : (
                     <div className="ticket-actions">
@@ -2608,7 +2689,7 @@ export default function BoothBookingApp() {
                 <summary>歷史紀錄（{pendingHistory.length}）</summary>
                 {pendingHistory.map((req) => (
                   <div key={req.id} className="history-row">
-                    <span>{req.partnerName}・{req.activityName}</span>
+                    <span>{req.partnerName}・{req.activityName}{req.rejectionReason ? `（${req.rejectionReason}）` : ''}</span>
                     <span className={`history-status ${req.status}`}>{req.status === 'approved' ? '已核准' : '已拒絕'}</span>
                   </div>
                 ))}
@@ -3478,6 +3559,10 @@ const baseStyles = `
 .add-row { background: #FFF3EA; }
 
 .pending-card .submitted-at { font-size: 0.72rem; color: #BFA89A; }
+.line-source-tag { display: inline-block; width: fit-content; margin: 3px 0 7px; padding: 3px 8px; border-radius: 999px; background: #EAF8ED; color: #2E7D43; font-size: .72rem; font-weight: 800; }
+.reject-panel { width: 100%; display: grid; gap: 9px; padding: 12px; background: #FFF8F5; border: 1px solid #F0D4D2; border-radius: 12px; }
+.reject-panel label { display: grid; gap: 6px; font-size: .8rem; font-weight: 700; }
+.reject-panel select, .reject-panel input { width: 100%; background: #fff; border: 1px solid #E9C9CE; border-radius: 9px; padding: 8px 9px; }
 .history-block { margin-top: 18px; color: #8A6B58; font-size: 0.85rem; }
 .history-block summary { cursor: pointer; }
 .history-row { display: flex; justify-content: space-between; padding: 6px 4px; border-bottom: 1px solid #F0DCDF; }

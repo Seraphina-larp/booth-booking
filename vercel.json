@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/line-request", "destination": "/index.html" }
+  ]
+}
