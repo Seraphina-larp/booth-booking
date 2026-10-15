@@ -61,6 +61,15 @@ const CATEGORY_META = {
 
 const FEEDBACK_TYPES = ['道具不足', '需要列印', '設備或場地問題', '其他建議'];
 
+/* 不屬於劇本庫任何一本、但仍要分開計數的場次類別。
+   由使用者自己指定，不依場次類型自動判斷——同一種名稱可能兩種型態都有。 */
+const OTHER_BUCKETS = [
+  { key: 'otherOwn', label: '其他場次' },
+  { key: 'otherRental', label: '其他出租場次' },
+  { key: 'nonScript', label: '非劇本活動' },
+];
+const OTHER_BUCKET_LABEL = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, b.label]));
+
 const DEFAULT_TEXTS = {
   overview_hint: '',
   request_hint: '填寫以下資訊送出，場地方確認後會幫您安排進場次表。',
@@ -1430,7 +1439,8 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
-  const [nonScriptNames, setNonScriptNames] = useState([]);
+  /* { 活動名稱: 'otherOwn' | 'otherRental' | 'nonScript' } */
+  const [otherNameMap, setOtherNameMap] = useState({});
   const [scriptYearFilter, setScriptYearFilter] = useState('all');
   const [scriptSyncing, setScriptSyncing] = useState(false);
   const [scriptSyncResult, setScriptSyncResult] = useState(null);
@@ -1577,10 +1587,10 @@ export default function BoothBookingApp() {
       saveScriptCatalog(next).catch((error) => console.error('劇本庫儲存失敗', error));
     }, 700);
   }
-  function persistNonScriptNames(next) {
-    setNonScriptNames(next);
+  function persistOtherNameMap(next) {
+    setOtherNameMap(next);
     if (adminUnlocked) {
-      savePrivateConfig({ nonScriptNames: next }).catch((error) => console.error('非劇本活動清單儲存失敗', error));
+      savePrivateConfig({ otherNameMap: next }).catch((error) => console.error('其他場次分類儲存失敗', error));
     }
   }
   function persistScriptCosts(next) {
@@ -1785,7 +1795,7 @@ export default function BoothBookingApp() {
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
           setScriptCosts(data.scriptCosts || {});
-          setNonScriptNames(data.nonScriptNames || []);
+          setOtherNameMap(data.otherNameMap || {});
         } else {
           if (!user.emailVerified) {
             setAdminLoginError('請先到信箱完成 Email 驗證，再回來登入');
@@ -1887,7 +1897,7 @@ export default function BoothBookingApp() {
       setReminderLog(data.reminderLog || {});
       setSyncConfig(data.syncConfig || {});
       setScriptCosts(data.scriptCosts || {});
-      setNonScriptNames(data.nonScriptNames || []);
+      setOtherNameMap(data.otherNameMap || {});
       setMigrationState('done');
       window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
     } catch (error) {
@@ -2531,15 +2541,15 @@ export default function BoothBookingApp() {
     bookings.filter(inYear).forEach((b) => {
       const script = findScript(scripts, b.scriptId || b.activityName);
       if (!script) {
-        /* 已經標成「非劇本活動」的就不再提醒，否則數字永遠降不下來 */
-        if (!nonScriptNames.includes((b.activityName || '').trim())) unmatched += 1;
+        /* 已經歸到「其他」三類之一的就不再提醒，否則數字永遠降不下來 */
+        if (!otherNameMap[(b.activityName || '').trim()]) unmatched += 1;
         return;
       }
       if (b.category === 'rentOut') rental += 1;
       else own += 1;
     });
     return { own, rental, total: own + rental, unmatched };
-  }, [bookings, scripts, scriptYearFilter, nonScriptNames]);
+  }, [bookings, scripts, scriptYearFilter, otherNameMap]);
 
   /* ---------- 對不到劇本的場次名稱 ----------
      逐一列出不同的活動名稱與次數，並附上最接近的劇本建議。
@@ -2566,28 +2576,27 @@ export default function BoothBookingApp() {
       .map((entry) => ({
         ...entry,
         years: Array.from(entry.years).sort(),
-        suggestion: nonScriptNames.includes(entry.name) ? null : suggestScript(scripts, entry.name),
-        ignored: nonScriptNames.includes(entry.name),
+        bucket: otherNameMap[entry.name] || '',
+        suggestion: otherNameMap[entry.name] ? null : suggestScript(scripts, entry.name),
       }))
-      .sort((a, b) => Number(a.ignored) - Number(b.ignored) || b.count - a.count
+      .sort((a, b) => Number(!!a.bucket) - Number(!!b.bucket) || b.count - a.count
         || a.name.localeCompare(b.name, 'zh-Hant'));
-  }, [bookings, scripts, nonScriptNames]);
+  }, [bookings, scripts, otherNameMap]);
 
-  const unmatchedActive = unmatchedNames.filter((n) => !n.ignored);
+  const unmatchedActive = unmatchedNames.filter((n) => !n.bucket);
 
-  /* 歸到「其他」的場次：單次借場、評估後沒上架的試水溫場、包場活動等。
+  /* 歸到「其他」的場次：單次借場、評估後沒上架的試跑場、包場活動等。
      這些不屬於任何一本，但仍是真實發生過的場次，所以照樣計數，
-     只是依類型拆成「其他場次」與「其他出租場次」兩欄。 */
+     依使用者指定的類別分開統計。 */
   const otherStats = useMemo(() => {
     const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
-    let own = 0;
-    let rental = 0;
+    const counts = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, 0]));
     bookings.filter(inYear).forEach((b) => {
-      if (!nonScriptNames.includes((b.activityName || '').trim())) return;
-      if (b.category === 'rentOut') rental += 1; else own += 1;
+      const bucket = otherNameMap[(b.activityName || '').trim()];
+      if (bucket && counts[bucket] !== undefined) counts[bucket] += 1;
     });
-    return { own, rental };
-  }, [bookings, nonScriptNames, scriptYearFilter]);
+    return counts;
+  }, [bookings, otherNameMap, scriptYearFilter]);
 
   function assignAlias(name, scriptId) {
     if (!scriptId) return;
@@ -2597,17 +2606,17 @@ export default function BoothBookingApp() {
       if (s.id === scriptId) return { ...s, aliases: [...aliases, name] };
       return aliases.length === (s.aliases || []).length ? s : { ...s, aliases };
     }));
-    if (nonScriptNames.includes(name)) {
-      persistNonScriptNames(nonScriptNames.filter((n) => n !== name));
+    if (otherNameMap[name]) {
+      const next = { ...otherNameMap };
+      delete next[name];
+      persistOtherNameMap(next);
     }
   }
 
-  function toggleNonScript(name) {
-    persistNonScriptNames(
-      nonScriptNames.includes(name)
-        ? nonScriptNames.filter((n) => n !== name)
-        : [...nonScriptNames, name],
-    );
+  function setOtherBucket(name, bucket) {
+    const next = { ...otherNameMap };
+    if (bucket) next[name] = bucket; else delete next[name];
+    persistOtherNameMap(next);
   }
 
   /* ---------- 租場夥伴場次統計 ----------
@@ -3830,18 +3839,12 @@ export default function BoothBookingApp() {
                 <div className="stat-label">出租場</div>
                 <div className="stat-value">{scriptTotals.rental}</div>
               </div>
-              {otherStats.own > 0 && (
-                <div className="stat-box">
-                  <div className="stat-label">其他場次</div>
-                  <div className="stat-value">{otherStats.own}</div>
+              {OTHER_BUCKETS.filter((bucket) => otherStats[bucket.key] > 0).map((bucket) => (
+                <div className="stat-box" key={bucket.key}>
+                  <div className="stat-label">{bucket.label}</div>
+                  <div className="stat-value">{otherStats[bucket.key]}</div>
                 </div>
-              )}
-              {otherStats.rental > 0 && (
-                <div className="stat-box">
-                  <div className="stat-label">其他出租場次</div>
-                  <div className="stat-value">{otherStats.rental}</div>
-                </div>
-              )}
+              ))}
             </div>
 
             <div className="sub-heading">劇本清單</div>
@@ -3870,7 +3873,7 @@ export default function BoothBookingApp() {
                 </summary>
                 <div className="unmatched-list">
                   {unmatchedNames.map((item) => (
-                    <div key={item.name} className={`unmatched-row ${item.ignored ? 'ignored' : ''}`}>
+                    <div key={item.name} className={`unmatched-row ${item.bucket ? 'ignored' : ''}`}>
                       <div className="unmatched-main">
                         <span className="unmatched-name">{item.name}</span>
                         <span className="unmatched-meta">
@@ -3881,12 +3884,18 @@ export default function BoothBookingApp() {
                         </span>
                       </div>
 
-                      {item.ignored ? (
+                      {item.bucket ? (
                         <div className="unmatched-actions">
-                          <span className="ignored-tag">
-                            已歸到{item.rental > 0 && item.own === 0 ? '其他出租場次' : '其他場次'}
-                          </span>
-                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
+                          <select
+                            value={item.bucket}
+                            onChange={(e) => setOtherBucket(item.name, e.target.value)}
+                            aria-label="改變歸類"
+                          >
+                            {OTHER_BUCKETS.map((bucket) => (
+                              <option key={bucket.key} value={bucket.key}>{bucket.label}</option>
+                            ))}
+                          </select>
+                          <button type="button" className="btn-ghost small" onClick={() => setOtherBucket(item.name, '')}>
                             復原
                           </button>
                         </div>
@@ -3917,9 +3926,16 @@ export default function BoothBookingApp() {
                               );
                             })}
                           </select>
-                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
-                            歸到其他
-                          </button>
+                          <select
+                            value=""
+                            onChange={(e) => setOtherBucket(item.name, e.target.value)}
+                            aria-label="歸到其他類別"
+                          >
+                            <option value="">歸到其他…</option>
+                            {OTHER_BUCKETS.map((bucket) => (
+                              <option key={bucket.key} value={bucket.key}>{bucket.label}</option>
+                            ))}
+                          </select>
                         </div>
                       )}
                     </div>
@@ -4918,7 +4934,6 @@ const baseStyles = `
   background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
   padding: 5px 8px; font-size: 0.78rem; color: #5B4032; max-width: 150px;
 }
-.ignored-tag { font-size: 0.73rem; color: #A98C7A; }
 .alias-row { display: flex; flex-wrap: wrap; gap: 5px; }
 .alias-chip {
   display: inline-flex; align-items: center; gap: 4px;
