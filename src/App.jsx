@@ -2493,6 +2493,47 @@ export default function BoothBookingApp() {
     });
   }, [scripts, scriptCosts, bookings]);
 
+  /* ---------- 全部劇本的場次總計（可依年份篩選） ---------- */
+
+  const scriptTotals = useMemo(() => {
+    const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
+    let own = 0;
+    let rental = 0;
+    let unmatched = 0;
+    bookings.filter(inYear).forEach((b) => {
+      const script = findScript(scripts, b.scriptId || b.activityName);
+      if (!script) {
+        unmatched += 1;
+        return;
+      }
+      if (b.category === 'rentOut') rental += 1;
+      else own += 1;
+    });
+    return { own, rental, total: own + rental, unmatched };
+  }, [bookings, scripts, scriptYearFilter]);
+
+  /* ---------- 租場夥伴場次統計 ----------
+     有些合作私團（例如 eli 私團）在官網只掛一個總稱「豪門驚情系列」，
+     實際每場跑的是不同本，用劇本去數會失真。改以「租場人」歸戶才準。 */
+
+  const rentalPartnerStats = useMemo(() => {
+    const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
+    const map = {};
+    bookings
+      .filter((b) => b.category === 'rentOut' && inYear(b))
+      .forEach((b) => {
+        const key = (b.personName || '').trim() || '未具名';
+        if (!map[key]) map[key] = { name: key, count: 0, income: 0, titles: {}, lastDate: '' };
+        const entry = map[key];
+        entry.count += 1;
+        entry.income += computeAmount(b);
+        const title = (b.activityName || '').trim() || '（未填劇本）';
+        entry.titles[title] = (entry.titles[title] || 0) + 1;
+        if ((b.date || '') > entry.lastDate) entry.lastDate = b.date || '';
+      });
+    return Object.values(map).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant'));
+  }, [bookings, scriptYearFilter]);
+
   const scriptStatsById = useMemo(
     () => Object.fromEntries(scriptStats.map((s) => [s.script.id, s])),
     [scriptStats],
@@ -3653,6 +3694,62 @@ export default function BoothBookingApp() {
               </span>
             </div>
 
+            <div className="sub-heading">
+              場次總計{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}
+            </div>
+            <div className="stat-row">
+              <div className="stat-box">
+                <div className="stat-label">總場次</div>
+                <div className="stat-value">{scriptTotals.total}</div>
+              </div>
+              <div className="stat-box paid">
+                <div className="stat-label">自家場</div>
+                <div className="stat-value">{scriptTotals.own}</div>
+              </div>
+              <div className="stat-box unpaid">
+                <div className="stat-label">出租場</div>
+                <div className="stat-value">{scriptTotals.rental}</div>
+              </div>
+            </div>
+            {scriptTotals.unmatched > 0 && (
+              <p className="hint small">
+                另有 {scriptTotals.unmatched} 場的活動名稱對不到劇本庫裡的任何一本，
+                沒有計入上面的數字。多半是包場活動或名稱打得跟劇本庫不一致——
+                到總覽的「表格編輯」把名稱改成跟劇本庫一致，或在這裡補上該劇本，就會自動歸戶。
+              </p>
+            )}
+
+            <div className="sub-heading">租場夥伴場次{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}</div>
+            <p className="hint small">
+              有些合作私團在官網只掛一個總稱（例如 eli 私團的「豪門驚情系列」），
+              實際每場跑的本都不一樣，用劇本去數會失真。這裡直接以租場人歸戶，場次才算得準。
+            </p>
+            {rentalPartnerStats.length === 0 ? (
+              <div className="empty-state small"><Inbox size={24} /><p>這個區間沒有出租場</p></div>
+            ) : (
+              <div className="partner-list">
+                {rentalPartnerStats.map((partner) => (
+                  <div key={partner.name} className="partner-row">
+                    <div className="partner-main">
+                      <span className="partner-name">{partner.name}</span>
+                      <span className="partner-titles">
+                        {Object.entries(partner.titles)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([title, count]) => `${title}${count > 1 ? ` ×${count}` : ''}`)
+                          .join('、')}
+                      </span>
+                    </div>
+                    <div className="partner-stats">
+                      <span className="script-stat"><em>{partner.count}</em> 場</span>
+                      <span className="script-stat">場地費 <em>{formatMoney(partner.income)}</em></span>
+                      {partner.lastDate && <span className="script-stat">最近 {formatDateShort(partner.lastDate)}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="sub-heading">劇本清單</div>
             <div className="script-list">
               {scriptStats.map((stat) => (
                 <ScriptLibraryRow
@@ -4554,6 +4651,17 @@ const baseStyles = `
 .year-filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .year-filter-label { font-size: 0.8rem; color: #A98C7A; white-space: nowrap; }
 .year-filter-row .hint { flex-basis: 100%; margin: 0; }
+
+/* ---------- 租場夥伴場次 ---------- */
+.partner-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.partner-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; padding: 10px 13px;
+}
+.partner-main { flex: 1; min-width: 0; }
+.partner-name { display: block; font-weight: 700; font-size: 0.88rem; color: #5B4032; }
+.partner-titles { display: block; font-size: 0.73rem; color: #A98C7A; margin-top: 2px; }
+.partner-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .script-badge {
   background: #FDEEF0; color: #C45D72; border-radius: 20px;
   padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;
