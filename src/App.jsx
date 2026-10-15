@@ -2516,23 +2516,57 @@ export default function BoothBookingApp() {
      有些合作私團（例如 eli 私團）在官網只掛一個總稱「豪門驚情系列」，
      實際每場跑的是不同本，用劇本去數會失真。改以「租場人」歸戶才準。 */
 
+  /* 官網有列名的合作夥伴＝劇本庫裡填了 partner 的那幾本。
+     後台的租場人可能只寫「eli」，官網寫的是「eli 私團」，所以比對時
+     去掉「私團」與空白再雙向包含比對。 */
+  const knownPartners = useMemo(() => {
+    const strip = (s) => String(s || '').replace(/私團|\s/g, '').toLowerCase();
+    const map = new Map();
+    scripts.forEach((s) => {
+      const label = (s.partner || '').trim();
+      if (!label) return;
+      const key = strip(label);
+      if (key && !map.has(key)) map.set(key, label);
+    });
+    return map;
+  }, [scripts]);
+
   const rentalPartnerStats = useMemo(() => {
+    const strip = (s) => String(s || '').replace(/私團|\s/g, '').toLowerCase();
     const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
-    const map = {};
+
+    const named = {};
+    const others = { name: '其他', count: 0, income: 0, titles: {}, lastDate: '', renters: {} };
+
     bookings
       .filter((b) => b.category === 'rentOut' && inYear(b))
       .forEach((b) => {
-        const key = (b.personName || '').trim() || '未具名';
-        if (!map[key]) map[key] = { name: key, count: 0, income: 0, titles: {}, lastDate: '' };
-        const entry = map[key];
+        const renter = (b.personName || '').trim() || '未具名';
+        const key = strip(renter);
+        /* 租場人對得到官網列名的夥伴就單獨一列，其他一律歸到「其他」 */
+        let label = '';
+        for (const [partnerKey, partnerLabel] of knownPartners) {
+          if (key && partnerKey && (key.includes(partnerKey) || partnerKey.includes(key))) {
+            label = partnerLabel;
+            break;
+          }
+        }
+        const entry = label
+          ? (named[label] = named[label] || { name: label, count: 0, income: 0, titles: {}, lastDate: '' })
+          : others;
         entry.count += 1;
         entry.income += computeAmount(b);
         const title = (b.activityName || '').trim() || '（未填劇本）';
         entry.titles[title] = (entry.titles[title] || 0) + 1;
         if ((b.date || '') > entry.lastDate) entry.lastDate = b.date || '';
+        if (!label) others.renters[renter] = (others.renters[renter] || 0) + 1;
       });
-    return Object.values(map).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant'));
-  }, [bookings, scriptYearFilter]);
+
+    return {
+      partners: Object.values(named).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant')),
+      others,
+    };
+  }, [bookings, scriptYearFilter, knownPartners]);
 
   const scriptStatsById = useMemo(
     () => Object.fromEntries(scriptStats.map((s) => [s.script.id, s])),
@@ -2773,6 +2807,7 @@ export default function BoothBookingApp() {
     });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
     tabs.push({ key: 'scripts', label: '劇本庫', Icon: BookOpen });
+    tabs.push({ key: 'rentals', label: '出租統計', Icon: MapPin });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
   }
@@ -3609,20 +3644,10 @@ export default function BoothBookingApp() {
         {tab === 'scripts' && adminUnlocked && (
           <section>
             <h2>劇本庫</h2>
-            <p className="hint">
-              這裡是新增場次時那個下拉選單的來源。預設已經帶入官網上的 {SCRIPTS_SEED.length} 本，
-              填上每一本的劇本費與道具費之後，系統會依「已開場次數」自動算出單場攤提成本與回本進度。
-              成本欄位只有管理者看得到，不會出現在公開頁面。
-            </p>
-
             <div className="sync-row">
               <button type="button" className="btn-primary" onClick={syncScriptsFromSite} disabled={scriptSyncing}>
                 <Download size={15} /> {scriptSyncing ? '同步中…' : '從官網同步劇本'}
               </button>
-              <span className="hint small">
-                會去 seraheyo.com 抓最新的劇本總覽，新本自動加進來、既有的更新名稱與價格。
-                你填過的成本資料和歷史場次不會被動到；官網上沒有的本也會保留。
-              </span>
             </div>
 
             {scriptSyncResult && (
@@ -3689,65 +3714,31 @@ export default function BoothBookingApp() {
                   </label>
                 ))}
               </div>
-              <span className="hint small">
-                只影響場次數的顯示。成本與回本進度一律是累積的，不分年份。
-              </span>
             </div>
 
             <div className="sub-heading">
               場次總計{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}
             </div>
             <div className="stat-row">
-              <div className="stat-box">
-                <div className="stat-label">總場次</div>
-                <div className="stat-value">{scriptTotals.total}</div>
-              </div>
               <div className="stat-box paid">
                 <div className="stat-label">自家場</div>
                 <div className="stat-value">{scriptTotals.own}</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">總場次</div>
+                <div className="stat-value">{scriptTotals.total}</div>
               </div>
               <div className="stat-box unpaid">
                 <div className="stat-label">出租場</div>
                 <div className="stat-value">{scriptTotals.rental}</div>
               </div>
+              {scriptTotals.unmatched > 0 && (
+                <div className="stat-box">
+                  <div className="stat-label">未對應到劇本</div>
+                  <div className="stat-value">{scriptTotals.unmatched}</div>
+                </div>
+              )}
             </div>
-            {scriptTotals.unmatched > 0 && (
-              <p className="hint small">
-                另有 {scriptTotals.unmatched} 場的活動名稱對不到劇本庫裡的任何一本，
-                沒有計入上面的數字。多半是包場活動或名稱打得跟劇本庫不一致——
-                到總覽的「表格編輯」把名稱改成跟劇本庫一致，或在這裡補上該劇本，就會自動歸戶。
-              </p>
-            )}
-
-            <div className="sub-heading">租場夥伴場次{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}</div>
-            <p className="hint small">
-              有些合作私團在官網只掛一個總稱（例如 eli 私團的「豪門驚情系列」），
-              實際每場跑的本都不一樣，用劇本去數會失真。這裡直接以租場人歸戶，場次才算得準。
-            </p>
-            {rentalPartnerStats.length === 0 ? (
-              <div className="empty-state small"><Inbox size={24} /><p>這個區間沒有出租場</p></div>
-            ) : (
-              <div className="partner-list">
-                {rentalPartnerStats.map((partner) => (
-                  <div key={partner.name} className="partner-row">
-                    <div className="partner-main">
-                      <span className="partner-name">{partner.name}</span>
-                      <span className="partner-titles">
-                        {Object.entries(partner.titles)
-                          .sort((a, b) => b[1] - a[1])
-                          .map(([title, count]) => `${title}${count > 1 ? ` ×${count}` : ''}`)
-                          .join('、')}
-                      </span>
-                    </div>
-                    <div className="partner-stats">
-                      <span className="script-stat"><em>{partner.count}</em> 場</span>
-                      <span className="script-stat">場地費 <em>{formatMoney(partner.income)}</em></span>
-                      {partner.lastDate && <span className="script-stat">最近 {formatDateShort(partner.lastDate)}</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
 
             <div className="sub-heading">劇本清單</div>
             <div className="script-list">
@@ -3766,6 +3757,85 @@ export default function BoothBookingApp() {
             <button type="button" className="btn-ghost wide" onClick={addScript}>
               <Plus size={15} /> 新增一本劇本
             </button>
+          </section>
+        )}
+
+        {tab === 'rentals' && adminUnlocked && (
+          <section>
+            <h2>出租統計</h2>
+
+            <div className="year-filter-row">
+              <span className="year-filter-label">年份</span>
+              <div className="radio-row">
+                <label className={`radio-pill ${scriptYearFilter === 'all' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    checked={scriptYearFilter === 'all'}
+                    onChange={() => setScriptYearFilter('all')}
+                    style={{ display: 'none' }}
+                  />
+                  全部年份
+                </label>
+                {availableYears.map((year) => (
+                  <label key={year} className={`radio-pill ${scriptYearFilter === String(year) ? 'active' : ''}`}>
+                    <input
+                      type="radio"
+                      checked={scriptYearFilter === String(year)}
+                      onChange={() => setScriptYearFilter(String(year))}
+                      style={{ display: 'none' }}
+                    />
+                    {year} 年
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {rentalPartnerStats.partners.length === 0 && rentalPartnerStats.others.count === 0 ? (
+              <div className="empty-state"><Inbox size={28} /><p>這個區間沒有出租場</p></div>
+            ) : (
+              <div className="partner-list">
+                {rentalPartnerStats.partners.map((partner) => (
+                  <div key={partner.name} className="partner-row">
+                    <div className="partner-main">
+                      <span className="partner-name">{partner.name}</span>
+                      <span className="partner-titles">
+                        {Object.entries(partner.titles)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([title, count]) => `${title}${count > 1 ? ` ×${count}` : ''}`)
+                          .join('、')}
+                      </span>
+                    </div>
+                    <div className="partner-stats">
+                      <span className="script-stat"><em>{partner.count}</em> 場</span>
+                      <span className="script-stat">場地費 <em>{formatMoney(partner.income)}</em></span>
+                      {partner.lastDate && <span className="script-stat">最近 {formatDateShort(partner.lastDate)}</span>}
+                    </div>
+                  </div>
+                ))}
+
+                {rentalPartnerStats.others.count > 0 && (
+                  <details className="partner-others">
+                    <summary>
+                      <span className="partner-name">其他</span>
+                      <span className="partner-stats">
+                        <span className="script-stat"><em>{rentalPartnerStats.others.count}</em> 場</span>
+                        <span className="script-stat">場地費 <em>{formatMoney(rentalPartnerStats.others.income)}</em></span>
+                      </span>
+                    </summary>
+                    <div className="partner-others-body">
+                      {Object.entries(rentalPartnerStats.others.renters)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([renter, count]) => (
+                          <div key={renter} className="partner-sub-row">
+                            <span>{renter}</span>
+                            <span className="script-stat"><em>{count}</em> 場</span>
+                          </div>
+                        ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
           </section>
         )}
 
@@ -4662,6 +4732,17 @@ const baseStyles = `
 .partner-name { display: block; font-weight: 700; font-size: 0.88rem; color: #5B4032; }
 .partner-titles { display: block; font-size: 0.73rem; color: #A98C7A; margin-top: 2px; }
 .partner-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.partner-others { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFF3EA; overflow: hidden; }
+.partner-others summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 13px; cursor: pointer; flex-wrap: wrap;
+}
+.partner-others summary::marker { color: #C9B0A2; }
+.partner-others-body { padding: 2px 13px 12px; }
+.partner-sub-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 0; font-size: 0.8rem; color: #5B4032; border-top: 1px dashed #F0DCDF;
+}
 .script-badge {
   background: #FDEEF0; color: #C45D72; border-radius: 20px;
   padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;
