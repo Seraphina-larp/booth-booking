@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import {
   EMPTY_SCRIPT_COST, SCRIPTS_SEED, SCRIPT_CATEGORIES,
-  findScript, isHolidayDate, unitPriceOf,
+  findScript, isHolidayDate, suggestScript, unitPriceOf,
 } from './scriptsData';
 import { auth } from './firebase';
 import {
@@ -1292,6 +1292,25 @@ function ScriptLibraryRow({ stat, yearFilter = 'all', onChangeField, onChangeCos
                 仍在上架（取消勾選後不會出現在新增場次的選單，但歷史紀錄會保留）
               </label>
             </div>
+            {(script.aliases || []).length > 0 && (
+              <div className="field span2">
+                <label>別名（這些舊名稱會自動歸到這本）</label>
+                <div className="alias-row">
+                  {(script.aliases || []).map((alias) => (
+                    <span key={alias} className="alias-chip">
+                      {alias}
+                      <button
+                        type="button"
+                        onClick={() => onChangeField(script.id, 'aliases', (script.aliases || []).filter((a) => a !== alias))}
+                        aria-label={`移除別名 ${alias}`}
+                      >
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="sub-heading small">一次性投入成本（只有管理者看得到）</div>
@@ -1411,6 +1430,7 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
+  const [nonScriptNames, setNonScriptNames] = useState([]);
   const [scriptYearFilter, setScriptYearFilter] = useState('all');
   const [scriptSyncing, setScriptSyncing] = useState(false);
   const [scriptSyncResult, setScriptSyncResult] = useState(null);
@@ -1556,6 +1576,12 @@ export default function BoothBookingApp() {
     scriptSaveTimer.current = setTimeout(() => {
       saveScriptCatalog(next).catch((error) => console.error('劇本庫儲存失敗', error));
     }, 700);
+  }
+  function persistNonScriptNames(next) {
+    setNonScriptNames(next);
+    if (adminUnlocked) {
+      savePrivateConfig({ nonScriptNames: next }).catch((error) => console.error('非劇本活動清單儲存失敗', error));
+    }
   }
   function persistScriptCosts(next) {
     setScriptCosts(next);
@@ -1759,6 +1785,7 @@ export default function BoothBookingApp() {
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
           setScriptCosts(data.scriptCosts || {});
+          setNonScriptNames(data.nonScriptNames || []);
         } else {
           if (!user.emailVerified) {
             setAdminLoginError('請先到信箱完成 Email 驗證，再回來登入');
@@ -1860,6 +1887,7 @@ export default function BoothBookingApp() {
       setReminderLog(data.reminderLog || {});
       setSyncConfig(data.syncConfig || {});
       setScriptCosts(data.scriptCosts || {});
+      setNonScriptNames(data.nonScriptNames || []);
       setMigrationState('done');
       window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
     } catch (error) {
@@ -2503,36 +2531,126 @@ export default function BoothBookingApp() {
     bookings.filter(inYear).forEach((b) => {
       const script = findScript(scripts, b.scriptId || b.activityName);
       if (!script) {
-        unmatched += 1;
+        /* 已經標成「非劇本活動」的就不再提醒，否則數字永遠降不下來 */
+        if (!nonScriptNames.includes((b.activityName || '').trim())) unmatched += 1;
         return;
       }
       if (b.category === 'rentOut') rental += 1;
       else own += 1;
     });
     return { own, rental, total: own + rental, unmatched };
-  }, [bookings, scripts, scriptYearFilter]);
+  }, [bookings, scripts, scriptYearFilter, nonScriptNames]);
+
+  /* ---------- 對不到劇本的場次名稱 ----------
+     逐一列出不同的活動名稱與次數，並附上最接近的劇本建議。
+     使用者確認後寫成該本的別名（aliases），之後同名場次就會自動歸戶；
+     本來就不是劇本的（包場、主題聚會）可以標成「非劇本活動」收起來。 */
+
+  const unmatchedNames = useMemo(() => {
+    const map = {};
+    bookings.forEach((b) => {
+      if (findScript(scripts, b.scriptId || b.activityName)) return;
+      const name = (b.activityName || '').trim() || '（未填名稱）';
+      if (!map[name]) {
+        map[name] = { name, count: 0, own: 0, rental: 0, lastDate: '', years: new Set() };
+      }
+      const entry = map[name];
+      entry.count += 1;
+      if (b.category === 'rentOut') entry.rental += 1; else entry.own += 1;
+      if ((b.date || '') > entry.lastDate) entry.lastDate = b.date || '';
+      const year = (b.date || '').slice(0, 4);
+      if (year) entry.years.add(year);
+    });
+
+    return Object.values(map)
+      .map((entry) => ({
+        ...entry,
+        years: Array.from(entry.years).sort(),
+        suggestion: nonScriptNames.includes(entry.name) ? null : suggestScript(scripts, entry.name),
+        ignored: nonScriptNames.includes(entry.name),
+      }))
+      .sort((a, b) => Number(a.ignored) - Number(b.ignored) || b.count - a.count
+        || a.name.localeCompare(b.name, 'zh-Hant'));
+  }, [bookings, scripts, nonScriptNames]);
+
+  const unmatchedActive = unmatchedNames.filter((n) => !n.ignored);
+
+  function assignAlias(name, scriptId) {
+    if (!scriptId) return;
+    persistScripts(scripts.map((s) => {
+      /* 別名只掛在被選中的那本上，其他本若誤掛過同一個名稱就順手清掉 */
+      const aliases = (s.aliases || []).filter((a) => a !== name);
+      if (s.id === scriptId) return { ...s, aliases: [...aliases, name] };
+      return aliases.length === (s.aliases || []).length ? s : { ...s, aliases };
+    }));
+    if (nonScriptNames.includes(name)) {
+      persistNonScriptNames(nonScriptNames.filter((n) => n !== name));
+    }
+  }
+
+  function toggleNonScript(name) {
+    persistNonScriptNames(
+      nonScriptNames.includes(name)
+        ? nonScriptNames.filter((n) => n !== name)
+        : [...nonScriptNames, name],
+    );
+  }
 
   /* ---------- 租場夥伴場次統計 ----------
      有些合作私團（例如 eli 私團）在官網只掛一個總稱「豪門驚情系列」，
      實際每場跑的是不同本，用劇本去數會失真。改以「租場人」歸戶才準。 */
 
+  /* 官網有列名的合作夥伴＝劇本庫裡填了 partner 的那幾本。
+     後台的租場人可能只寫「eli」，官網寫的是「eli 私團」，所以比對時
+     去掉「私團」與空白再雙向包含比對。 */
+  const knownPartners = useMemo(() => {
+    const strip = (s) => String(s || '').replace(/私團|\s/g, '').toLowerCase();
+    const map = new Map();
+    scripts.forEach((s) => {
+      const label = (s.partner || '').trim();
+      if (!label) return;
+      const key = strip(label);
+      if (key && !map.has(key)) map.set(key, label);
+    });
+    return map;
+  }, [scripts]);
+
   const rentalPartnerStats = useMemo(() => {
+    const strip = (s) => String(s || '').replace(/私團|\s/g, '').toLowerCase();
     const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
-    const map = {};
+
+    const named = {};
+    const others = { name: '其他', count: 0, income: 0, titles: {}, lastDate: '', renters: {} };
+
     bookings
       .filter((b) => b.category === 'rentOut' && inYear(b))
       .forEach((b) => {
-        const key = (b.personName || '').trim() || '未具名';
-        if (!map[key]) map[key] = { name: key, count: 0, income: 0, titles: {}, lastDate: '' };
-        const entry = map[key];
+        const renter = (b.personName || '').trim() || '未具名';
+        const key = strip(renter);
+        /* 租場人對得到官網列名的夥伴就單獨一列，其他一律歸到「其他」 */
+        let label = '';
+        for (const [partnerKey, partnerLabel] of knownPartners) {
+          if (key && partnerKey && (key.includes(partnerKey) || partnerKey.includes(key))) {
+            label = partnerLabel;
+            break;
+          }
+        }
+        const entry = label
+          ? (named[label] = named[label] || { name: label, count: 0, income: 0, titles: {}, lastDate: '' })
+          : others;
         entry.count += 1;
         entry.income += computeAmount(b);
         const title = (b.activityName || '').trim() || '（未填劇本）';
         entry.titles[title] = (entry.titles[title] || 0) + 1;
         if ((b.date || '') > entry.lastDate) entry.lastDate = b.date || '';
+        if (!label) others.renters[renter] = (others.renters[renter] || 0) + 1;
       });
-    return Object.values(map).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant'));
-  }, [bookings, scriptYearFilter]);
+
+    return {
+      partners: Object.values(named).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant')),
+      others,
+    };
+  }, [bookings, scriptYearFilter, knownPartners]);
 
   const scriptStatsById = useMemo(
     () => Object.fromEntries(scriptStats.map((s) => [s.script.id, s])),
@@ -2773,6 +2891,7 @@ export default function BoothBookingApp() {
     });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
     tabs.push({ key: 'scripts', label: '劇本庫', Icon: BookOpen });
+    tabs.push({ key: 'rentals', label: '出租統計', Icon: MapPin });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
   }
@@ -3609,20 +3728,10 @@ export default function BoothBookingApp() {
         {tab === 'scripts' && adminUnlocked && (
           <section>
             <h2>劇本庫</h2>
-            <p className="hint">
-              這裡是新增場次時那個下拉選單的來源。預設已經帶入官網上的 {SCRIPTS_SEED.length} 本，
-              填上每一本的劇本費與道具費之後，系統會依「已開場次數」自動算出單場攤提成本與回本進度。
-              成本欄位只有管理者看得到，不會出現在公開頁面。
-            </p>
-
             <div className="sync-row">
               <button type="button" className="btn-primary" onClick={syncScriptsFromSite} disabled={scriptSyncing}>
                 <Download size={15} /> {scriptSyncing ? '同步中…' : '從官網同步劇本'}
               </button>
-              <span className="hint small">
-                會去 seraheyo.com 抓最新的劇本總覽，新本自動加進來、既有的更新名稱與價格。
-                你填過的成本資料和歷史場次不會被動到；官網上沒有的本也會保留。
-              </span>
             </div>
 
             {scriptSyncResult && (
@@ -3689,64 +3798,94 @@ export default function BoothBookingApp() {
                   </label>
                 ))}
               </div>
-              <span className="hint small">
-                只影響場次數的顯示。成本與回本進度一律是累積的，不分年份。
-              </span>
             </div>
 
             <div className="sub-heading">
               場次總計{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}
             </div>
             <div className="stat-row">
-              <div className="stat-box">
-                <div className="stat-label">總場次</div>
-                <div className="stat-value">{scriptTotals.total}</div>
-              </div>
               <div className="stat-box paid">
                 <div className="stat-label">自家場</div>
                 <div className="stat-value">{scriptTotals.own}</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">總場次</div>
+                <div className="stat-value">{scriptTotals.total}</div>
               </div>
               <div className="stat-box unpaid">
                 <div className="stat-label">出租場</div>
                 <div className="stat-value">{scriptTotals.rental}</div>
               </div>
+              {scriptTotals.unmatched > 0 && (
+                <div className="stat-box">
+                  <div className="stat-label">未對應到劇本</div>
+                  <div className="stat-value">{scriptTotals.unmatched}</div>
+                </div>
+              )}
             </div>
-            {scriptTotals.unmatched > 0 && (
-              <p className="hint small">
-                另有 {scriptTotals.unmatched} 場的活動名稱對不到劇本庫裡的任何一本，
-                沒有計入上面的數字。多半是包場活動或名稱打得跟劇本庫不一致——
-                到總覽的「表格編輯」把名稱改成跟劇本庫一致，或在這裡補上該劇本，就會自動歸戶。
-              </p>
-            )}
 
-            <div className="sub-heading">租場夥伴場次{scriptYearFilter !== 'all' && `（${scriptYearFilter} 年）`}</div>
-            <p className="hint small">
-              有些合作私團在官網只掛一個總稱（例如 eli 私團的「豪門驚情系列」），
-              實際每場跑的本都不一樣，用劇本去數會失真。這裡直接以租場人歸戶，場次才算得準。
-            </p>
-            {rentalPartnerStats.length === 0 ? (
-              <div className="empty-state small"><Inbox size={24} /><p>這個區間沒有出租場</p></div>
-            ) : (
-              <div className="partner-list">
-                {rentalPartnerStats.map((partner) => (
-                  <div key={partner.name} className="partner-row">
-                    <div className="partner-main">
-                      <span className="partner-name">{partner.name}</span>
-                      <span className="partner-titles">
-                        {Object.entries(partner.titles)
-                          .sort((a, b) => b[1] - a[1])
-                          .map(([title, count]) => `${title}${count > 1 ? ` ×${count}` : ''}`)
-                          .join('、')}
-                      </span>
+            {unmatchedNames.length > 0 && (
+              <>
+                <div className="sub-heading">
+                  未對應到劇本的場次名稱
+                  {unmatchedActive.length > 0 && <span className="heading-count">{unmatchedActive.length} 種</span>}
+                </div>
+                <div className="unmatched-list">
+                  {unmatchedNames.map((item) => (
+                    <div key={item.name} className={`unmatched-row ${item.ignored ? 'ignored' : ''}`}>
+                      <div className="unmatched-main">
+                        <span className="unmatched-name">{item.name}</span>
+                        <span className="unmatched-meta">
+                          {item.count} 場
+                          {item.rental > 0 && `（自家 ${item.own}・出租 ${item.rental}）`}
+                          {item.years.length > 0 && `・${item.years.join('、')}`}
+                          {item.lastDate && `・最近 ${formatDateShort(item.lastDate)}`}
+                        </span>
+                      </div>
+
+                      {item.ignored ? (
+                        <div className="unmatched-actions">
+                          <span className="ignored-tag">非劇本活動</span>
+                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
+                            復原
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="unmatched-actions">
+                          {item.suggestion && (
+                            <button
+                              type="button"
+                              className="btn-primary small"
+                              onClick={() => assignAlias(item.name, item.suggestion.script.id)}
+                            >
+                              <Check size={12} /> 對應到《{item.suggestion.script.title}》
+                            </button>
+                          )}
+                          <select
+                            value=""
+                            onChange={(e) => assignAlias(item.name, e.target.value)}
+                            aria-label="手動指定劇本"
+                          >
+                            <option value="">手動指定…</option>
+                            {SCRIPT_CATEGORIES.map((category) => {
+                              const items = scripts.filter((s) => s.category === category);
+                              if (items.length === 0) return null;
+                              return (
+                                <optgroup key={category} label={category}>
+                                  {items.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+                                </optgroup>
+                              );
+                            })}
+                          </select>
+                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
+                            非劇本活動
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div className="partner-stats">
-                      <span className="script-stat"><em>{partner.count}</em> 場</span>
-                      <span className="script-stat">場地費 <em>{formatMoney(partner.income)}</em></span>
-                      {partner.lastDate && <span className="script-stat">最近 {formatDateShort(partner.lastDate)}</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </>
             )}
 
             <div className="sub-heading">劇本清單</div>
@@ -3766,6 +3905,85 @@ export default function BoothBookingApp() {
             <button type="button" className="btn-ghost wide" onClick={addScript}>
               <Plus size={15} /> 新增一本劇本
             </button>
+          </section>
+        )}
+
+        {tab === 'rentals' && adminUnlocked && (
+          <section>
+            <h2>出租統計</h2>
+
+            <div className="year-filter-row">
+              <span className="year-filter-label">年份</span>
+              <div className="radio-row">
+                <label className={`radio-pill ${scriptYearFilter === 'all' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    checked={scriptYearFilter === 'all'}
+                    onChange={() => setScriptYearFilter('all')}
+                    style={{ display: 'none' }}
+                  />
+                  全部年份
+                </label>
+                {availableYears.map((year) => (
+                  <label key={year} className={`radio-pill ${scriptYearFilter === String(year) ? 'active' : ''}`}>
+                    <input
+                      type="radio"
+                      checked={scriptYearFilter === String(year)}
+                      onChange={() => setScriptYearFilter(String(year))}
+                      style={{ display: 'none' }}
+                    />
+                    {year} 年
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {rentalPartnerStats.partners.length === 0 && rentalPartnerStats.others.count === 0 ? (
+              <div className="empty-state"><Inbox size={28} /><p>這個區間沒有出租場</p></div>
+            ) : (
+              <div className="partner-list">
+                {rentalPartnerStats.partners.map((partner) => (
+                  <div key={partner.name} className="partner-row">
+                    <div className="partner-main">
+                      <span className="partner-name">{partner.name}</span>
+                      <span className="partner-titles">
+                        {Object.entries(partner.titles)
+                          .sort((a, b) => b[1] - a[1])
+                          .map(([title, count]) => `${title}${count > 1 ? ` ×${count}` : ''}`)
+                          .join('、')}
+                      </span>
+                    </div>
+                    <div className="partner-stats">
+                      <span className="script-stat"><em>{partner.count}</em> 場</span>
+                      <span className="script-stat">場地費 <em>{formatMoney(partner.income)}</em></span>
+                      {partner.lastDate && <span className="script-stat">最近 {formatDateShort(partner.lastDate)}</span>}
+                    </div>
+                  </div>
+                ))}
+
+                {rentalPartnerStats.others.count > 0 && (
+                  <details className="partner-others">
+                    <summary>
+                      <span className="partner-name">其他</span>
+                      <span className="partner-stats">
+                        <span className="script-stat"><em>{rentalPartnerStats.others.count}</em> 場</span>
+                        <span className="script-stat">場地費 <em>{formatMoney(rentalPartnerStats.others.income)}</em></span>
+                      </span>
+                    </summary>
+                    <div className="partner-others-body">
+                      {Object.entries(rentalPartnerStats.others.renters)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([renter, count]) => (
+                          <div key={renter} className="partner-sub-row">
+                            <span>{renter}</span>
+                            <span className="script-stat"><em>{count}</em> 場</span>
+                          </div>
+                        ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            )}
           </section>
         )}
 
@@ -4652,6 +4870,35 @@ const baseStyles = `
 .year-filter-label { font-size: 0.8rem; color: #A98C7A; white-space: nowrap; }
 .year-filter-row .hint { flex-basis: 100%; margin: 0; }
 
+/* ---------- 未對應場次名稱 ---------- */
+.heading-count {
+  margin-left: 8px; background: #FDEEF0; color: #C45D72;
+  border-radius: 20px; padding: 1px 9px; font-size: 0.72rem; font-weight: 400;
+}
+.unmatched-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.unmatched-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; padding: 10px 13px;
+}
+.unmatched-row.ignored { opacity: 0.55; background: #FAF6F1; }
+.unmatched-main { flex: 1; min-width: 180px; }
+.unmatched-name { display: block; font-weight: 700; font-size: 0.86rem; color: #5B4032; }
+.unmatched-meta { display: block; font-size: 0.72rem; color: #A98C7A; margin-top: 2px; }
+.unmatched-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.unmatched-actions select {
+  background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 5px 8px; font-size: 0.78rem; color: #5B4032; max-width: 150px;
+}
+.ignored-tag { font-size: 0.73rem; color: #A98C7A; }
+.alias-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.alias-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #FFF3EA; border: 1px solid #E9C9CE; border-radius: 20px;
+  padding: 2px 6px 2px 10px; font-size: 0.75rem; color: #5B4032;
+}
+.alias-chip button { background: none; border: none; cursor: pointer; color: #C9B0A2; display: flex; padding: 2px; }
+.alias-chip button:hover { color: #C4555A; }
+
 /* ---------- 租場夥伴場次 ---------- */
 .partner-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
 .partner-row {
@@ -4662,6 +4909,17 @@ const baseStyles = `
 .partner-name { display: block; font-weight: 700; font-size: 0.88rem; color: #5B4032; }
 .partner-titles { display: block; font-size: 0.73rem; color: #A98C7A; margin-top: 2px; }
 .partner-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.partner-others { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFF3EA; overflow: hidden; }
+.partner-others summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 13px; cursor: pointer; flex-wrap: wrap;
+}
+.partner-others summary::marker { color: #C9B0A2; }
+.partner-others-body { padding: 2px 13px 12px; }
+.partner-sub-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 5px 0; font-size: 0.8rem; color: #5B4032; border-top: 1px dashed #F0DCDF;
+}
 .script-badge {
   background: #FDEEF0; color: #C45D72; border-radius: 20px;
   padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;

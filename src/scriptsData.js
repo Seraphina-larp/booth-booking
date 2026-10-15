@@ -83,16 +83,79 @@ export const EMPTY_SCRIPT_COST = {
   costNote: '',
 };
 
-/* 用代碼或名稱找劇本；舊場次只存了名稱，所以名稱也要能對得到 */
+export function normalizeTitle(s) {
+  return String(s || '').replace(/[《》〈〉()（）\[\]【】\s\-－—~～、,，.。．・·!！?？:：;；+＋/／]/g, '').toLowerCase();
+}
+
+/* 用代碼或名稱找劇本。舊場次只存了名稱，而且常常是簡稱，
+   所以除了正式名稱，也比對每本自己的別名清單（aliases）。 */
 export function findScript(scripts, key) {
   if (!key) return null;
-  const normalize = (s) => String(s || '').replace(/[《》\s]/g, '');
+  const target = normalizeTitle(key);
+  if (!target) return null;
   return (
     scripts.find((s) => s.id === key)
     || scripts.find((s) => s.title === key)
-    || scripts.find((s) => normalize(s.title) === normalize(key))
+    || scripts.find((s) => normalizeTitle(s.title) === target)
+    || scripts.find((s) => (s.aliases || []).some((a) => normalizeTitle(a) === target))
     || null
   );
+}
+
+/* 兩個字串的相似度（0~1），用相鄰雙字組比對。
+   目的是幫「無名之町 上+下」這類簡稱猜出最可能的本，只是建議，不自動套用。 */
+function bigrams(s) {
+  const set = new Set();
+  for (let i = 0; i < s.length - 1; i += 1) set.add(s.slice(i, i + 2));
+  if (s.length === 1) set.add(s);
+  return set;
+}
+
+function similarity(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const setA = bigrams(a);
+  const setB = bigrams(b);
+  if (setA.size === 0 || setB.size === 0) return 0;
+  let shared = 0;
+  setA.forEach((gram) => { if (setB.has(gram)) shared += 1; });
+  return (2 * shared) / (setA.size + setB.size);
+}
+
+/* short 的字元是否依序出現在 long 裡（例如「季風2」之於「季風吹過橘色的海2苦夏」）。
+   簡稱多半是把原名挑幾個字留下來，所以這個比單純的包含更管用。 */
+function isSubsequence(short, long) {
+  if (short.length < 2 || short.length >= long.length) return false;
+  let i = 0;
+  for (let j = 0; j < long.length && i < short.length; j += 1) {
+    if (long[j] === short[i]) i += 1;
+  }
+  return i === short.length;
+}
+
+/* 幫一個對不到的名稱猜最接近的劇本；信心太低就不給建議。
+   這只是建議，一律要使用者確認後才會寫成別名。 */
+export function suggestScript(scripts, name) {
+  const target = normalizeTitle(name);
+  if (!target) return null;
+  let best = null;
+  let bestScore = 0;
+  scripts.forEach((script) => {
+    const title = normalizeTitle(script.title);
+    if (!title) return;
+    const contains = title.includes(target) || target.includes(title);
+    const subseq = isSubsequence(target, title);
+    const score = Math.max(
+      similarity(target, title),
+      contains ? 0.72 : 0,
+      subseq ? 0.55 : 0,
+    );
+    if (score > bestScore) {
+      bestScore = score;
+      best = script;
+    }
+  });
+  return bestScore >= 0.4 ? { script: best, score: bestScore } : null;
 }
 
 /* 判斷日期是否為假日（六、日）；用來決定要套平日價還是假日價 */
