@@ -1199,13 +1199,20 @@ function ScriptAmortTable({ stats }) {
 
 /* --------------------------------- 劇本庫單列 --------------------------------- */
 
-function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
+function ScriptLibraryRow({ stat, yearFilter = 'all', onChangeField, onChangeCost, onRemove }) {
   const [open, setOpen] = useState(false);
   const {
     script, cost, invested, sessionCount, ownCount, rentalCount, rentalIncome,
-    perSession, grossProfit,
+    byYear, perSession, grossProfit,
   } = stat;
   const recovered = invested > 0 && grossProfit >= invested;
+
+  /* 年份篩選只改「顯示的場次數」，攤提與回本一律用累積值 */
+  const yearRow = yearFilter === 'all' ? null : (byYear[yearFilter] || { total: 0, own: 0, rental: 0 });
+  const shownTotal = yearRow ? yearRow.total : sessionCount;
+  const shownOwn = yearRow ? yearRow.own : ownCount;
+  const shownRental = yearRow ? yearRow.rental : rentalCount;
+  const yearKeys = Object.keys(byYear).sort();
 
   return (
     <div className={`script-card ${script.active === false ? 'inactive' : ''}`}>
@@ -1222,8 +1229,9 @@ function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
         </div>
         <div className="script-card-stats">
           <span className="script-stat">
-            <em>{sessionCount}</em> 場
-            {rentalCount > 0 && <span className="script-stat-split">（自家 {ownCount}・出租 {rentalCount}）</span>}
+            <em>{shownTotal}</em> 場
+            {yearRow && <span className="script-stat-split">{yearFilter} 年</span>}
+            {shownRental > 0 && <span className="script-stat-split">（自家 {shownOwn}・出租 {shownRental}）</span>}
           </span>
           <span className="script-stat">
             投入 <em>{invested > 0 ? formatMoney(invested) : '—'}</em>
@@ -1326,6 +1334,17 @@ function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
                 已列入金額總覽的出租收入，不計入這本的回本。
               </div>
             )}
+            {yearKeys.length > 0 && (
+              <div className="year-breakdown">
+                各年度場次：
+                {yearKeys.map((year) => (
+                  <span key={year} className="year-chip">
+                    {year} 年 <strong>{byYear[year].total}</strong> 場
+                    {byYear[year].rental > 0 && `（自家 ${byYear[year].own}・出租 ${byYear[year].rental}）`}
+                  </span>
+                ))}
+              </div>
+            )}
             <div className={stat.netProfit >= 0 ? 'amort-positive' : 'amort-negative'}>
               扣除投入後損益：<strong>{formatMoney(stat.netProfit)}</strong>
             </div>
@@ -1392,6 +1411,7 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
+  const [scriptYearFilter, setScriptYearFilter] = useState('all');
   const [scriptSyncing, setScriptSyncing] = useState(false);
   const [scriptSyncResult, setScriptSyncResult] = useState(null);
   const [tab, setTab] = useState('overview');
@@ -2443,6 +2463,17 @@ export default function BoothBookingApp() {
       const rentalCount = rentalSessions.length;      // 出租場次
       const rentalIncome = rentalSessions.reduce((sum, b) => sum + computeAmount(b), 0);
 
+      /* 分年度場次：{ '2026': { total, own, rental }, ... } */
+      const byYear = {};
+      allSessions.forEach((b) => {
+        const year = (b.date || '').slice(0, 4);
+        if (!year) return;
+        if (!byYear[year]) byYear[year] = { total: 0, own: 0, rental: 0 };
+        byYear[year].total += 1;
+        if (b.category === 'rentOut') byYear[year].rental += 1;
+        else byYear[year].own += 1;
+      });
+
       const revenue = ownSessions.reduce((sum, b) => sum + computeAmount(b), 0);
       const wages = ownSessions.reduce((sum, b) => sum + computeWages(b), 0);
       const expenses = ownSessions.reduce((sum, b) => sum + computeExpenses(b), 0);
@@ -2455,7 +2486,7 @@ export default function BoothBookingApp() {
       const lastDate = allSessions.map((b) => b.date).sort().slice(-1)[0] || '';
       return {
         script, cost, invested,
-        sessionCount, ownCount, rentalCount, rentalIncome,
+        sessionCount, ownCount, rentalCount, rentalIncome, byYear,
         revenue, wages, expenses,
         perSession, grossProfit, netProfit, recoveryRate, lastDate,
       };
@@ -3593,11 +3624,41 @@ export default function BoothBookingApp() {
               </div>
             </div>
 
+            <div className="year-filter-row">
+              <span className="year-filter-label">場次統計年份</span>
+              <div className="radio-row">
+                <label className={`radio-pill ${scriptYearFilter === 'all' ? 'active' : ''}`}>
+                  <input
+                    type="radio"
+                    checked={scriptYearFilter === 'all'}
+                    onChange={() => setScriptYearFilter('all')}
+                    style={{ display: 'none' }}
+                  />
+                  全部年份
+                </label>
+                {availableYears.map((year) => (
+                  <label key={year} className={`radio-pill ${scriptYearFilter === String(year) ? 'active' : ''}`}>
+                    <input
+                      type="radio"
+                      checked={scriptYearFilter === String(year)}
+                      onChange={() => setScriptYearFilter(String(year))}
+                      style={{ display: 'none' }}
+                    />
+                    {year} 年
+                  </label>
+                ))}
+              </div>
+              <span className="hint small">
+                只影響場次數的顯示。成本與回本進度一律是累積的，不分年份。
+              </span>
+            </div>
+
             <div className="script-list">
               {scriptStats.map((stat) => (
                 <ScriptLibraryRow
                   key={stat.script.id}
                   stat={stat}
+                  yearFilter={scriptYearFilter}
                   onChangeField={updateScriptField}
                   onChangeCost={updateScriptCost}
                   onRemove={removeScript}
@@ -4488,6 +4549,11 @@ const baseStyles = `
 .script-stat em { font-style: normal; font-weight: 700; color: #5B4032; }
 .script-stat-split { color: #BFA89A; font-size: 0.69rem; margin-left: 3px; }
 .rental-note { flex-basis: 100%; color: #A98C7A; font-size: 0.75rem; line-height: 1.5; }
+.year-breakdown { flex-basis: 100%; font-size: 0.78rem; color: #5B4032; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.year-chip { background: #fff; border: 1px solid #E9C9CE; border-radius: 20px; padding: 2px 10px; }
+.year-filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.year-filter-label { font-size: 0.8rem; color: #A98C7A; white-space: nowrap; }
+.year-filter-row .hint { flex-basis: 100%; margin: 0; }
 .script-badge {
   background: #FDEEF0; color: #C45D72; border-radius: 20px;
   padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;
