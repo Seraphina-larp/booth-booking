@@ -2,8 +2,13 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Sunrise, Sun, Moon, Plus, Pencil, Trash2, Check, X, Lock, Unlock,
   ChevronLeft, ChevronRight, User, Wallet, CalendarDays,
-  MapPin, Inbox, Send, Search, RotateCcw, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
+  MapPin, Inbox, Send, Search, Flower2, Key, MessageSquare, Bell, Upload, FileText, Download, Users,
+  BookOpen, Receipt, Calculator,
 } from 'lucide-react';
+import {
+  EMPTY_SCRIPT_COST, SCRIPTS_SEED, SCRIPT_CATEGORIES,
+  findScript, isHolidayDate, unitPriceOf,
+} from './scriptsData';
 import { auth } from './firebase';
 import {
   createUserWithEmailAndPassword, onAuthStateChanged, sendEmailVerification,
@@ -24,6 +29,7 @@ import {
   saveFeedback,
   savePrivateConfig,
   savePublicConfig,
+  saveScriptCatalog,
   saveStaffProfile,
   submitApplication,
   submitAccessRequest,
@@ -64,8 +70,8 @@ const DEFAULT_TEXTS = {
   finance_hint: '',
   staff_hint: '幫每位主持人／NPC／租場夥伴設定查詢密碼。他們在「主持人查詢」輸入自己名字後，需要輸入這組密碼才能看到金額（薪水或場地費）。',
   reminders_hint: '這裡會整理出「誰、什麼時候要帶場」並產生提醒文字。要說明的是：這個原型沒辦法自動發送 LINE 訊息——LINE 的官方推播需要另外申請 Messaging API 並架設後端服務才能做到排程自動發送，這部分超出純前端原型能做的範圍。目前先幫你做到「整理名單 + 一鍵複製訊息」，複製後手動貼到 LINE 傳送即可，也可以勾選「已提醒」避免重複通知。',
-  import_hint: '選好類型、日期、包廂之後填活動名稱、預約人、主持人，按「加入清單」會先放進下面的待新增清單，確認沒問題後再按「確認新增」一次存入。如果你有一大批資料想直接貼上試算表批量處理，可以打開下面的「進階」選項。',
-  import_hint2: '進階匯入用的標題列格式如上。時段欄可填早/中/晚其中一個或多個，跨時段請用「、」或「;」分隔（不要用一般逗號，會跟欄位分隔符號搞混），例如「中、晚」。開始時間與結束時間都必須填寫（格式 HH:MM），不能留空。類型填「自家場」「出租場」或「外借場」。主持人清單格式是「姓名:角色:薪水」，多人用「;」分隔，例如 沙拉:主持:1800;小宇:NPC:800（自家場/外借場用，出租場可留空）。收款狀態填「已收款」，留空代表未收款。租金計算方式填「固定費率」「票房抽成」或「直接輸入」（出租場用）。',
+  import_hint: '選好類型、日期、包廂之後從下拉選單挑劇本，填人數、預約人、主持人，按「加入清單」會先放進下面的待新增清單，確認沒問題後再按「確認新增」一次存入。填了人數系統會依劇本定價自動試算收費金額，按「帶入實收」就會填進去，有折扣再手動改即可。如果你有一大批資料想直接貼上試算表批量處理，可以打開下面的「進階」選項。',
+  import_hint2: '進階匯入用的標題列格式如上。時段欄可填早/中/晚其中一個或多個，跨時段請用「、」或「;」分隔（不要用一般逗號，會跟欄位分隔符號搞混），例如「中、晚」。開始時間與結束時間都必須填寫（格式 HH:MM），不能留空。類型填「自家場」「出租場」或「外借場」。主持人清單格式是「姓名:角色:薪水」，多人用「;」分隔，例如 沙拉:主持:1800;小宇:NPC:800（自家場/外借場用，出租場可留空）。雜支格式是「項目:金額」，多筆用「;」分隔，例如 餐費:600;印刷:150。活動名稱如果和劇本庫裡的名稱一致，系統會自動對應到該本，攤提才算得進去。收款狀態填「已收款」，留空代表未收款。租金計算方式填「固定費率」「票房抽成」或「直接輸入」（出租場用）。',
 };
 
 const TEXT_FIELDS = [
@@ -105,12 +111,20 @@ function weekdayOf(dateStr) {
   return WEEKDAYS[new Date(y, m - 1, d).getDay()];
 }
 
-function formatDateShort(dateStr) {
+/* 日期顯示：今年的場次只顯示月/日，其他年份自動補上年份，
+   避免 2026/11/08 跟 2027/11/08 在同一個畫面上看起來一模一樣。 */
+function formatDateShort(dateStr, { alwaysYear = false } = {}) {
   if (!dateStr) return '未填日期';
   const parts = dateStr.split('-').map(Number);
   if (parts.length < 3) return dateStr;
-  const [, m, d] = parts;
-  return `${m}/${d}（${weekdayOf(dateStr)}）`;
+  const [y, m, d] = parts;
+  const showYear = alwaysYear || y !== new Date().getFullYear();
+  const prefix = showYear ? `${y}/` : '';
+  return `${prefix}${m}/${d}（${weekdayOf(dateStr)}）`;
+}
+
+function formatDateFull(dateStr) {
+  return formatDateShort(dateStr, { alwaysYear: true });
 }
 
 function computeFee(b) {
@@ -125,6 +139,35 @@ function computeAmount(b) {
   if (!b) return 0;
   if (b.category === 'rentOut') return computeFee(b);
   return Number(b.ownAmount) || 0;
+}
+
+/* --------------------------------- 雜支 --------------------------------- */
+
+const EXPENSE_PRESETS = ['餐費', '交通', '印刷', '耗材', '道具補充', '清潔', '場地加購', '其他'];
+
+function getExpenses(b) {
+  return Array.isArray(b?.expenses) ? b.expenses : [];
+}
+
+function computeExpenses(b) {
+  return getExpenses(b).reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+}
+
+function computeWages(b) {
+  return getHostsList(b).reduce((sum, h) => sum + (Number(h.wage) || 0), 0);
+}
+
+/* 單場總支出＝主持人薪資＋雜支 */
+function computeCost(b) {
+  return computeWages(b) + computeExpenses(b);
+}
+
+/* 人數 × 該本定價，用來自動試算收費金額 */
+function estimateAmount(booking, scripts) {
+  const script = findScript(scripts, booking?.scriptId || booking?.activityName);
+  const headcount = Number(booking?.headcount) || 0;
+  if (!script || !headcount) return 0;
+  return unitPriceOf(script, booking.date) * headcount;
 }
 
 function formatMoney(n) {
@@ -181,7 +224,7 @@ function copyText(text) {
 
 /* --------------------------------- 資料匯入 --------------------------------- */
 
-const IMPORT_HEADER_LINE = '日期,時段,類型,包廂或場地,活動名稱,預約人,聯絡方式,主持人清單,對方主持人,收費金額,收款狀態,租金計算方式,費率,小時數,票房總額,抽成比例,手動金額,開始時間,結束時間,備註';
+const IMPORT_HEADER_LINE = '日期,時段,類型,包廂或場地,活動名稱,人數,預約人,聯絡方式,主持人清單,對方主持人,收費金額,收款狀態,租金計算方式,費率,小時數,票房總額,抽成比例,手動金額,開始時間,結束時間,雜支,備註';
 
 function detectDelimiter(line) {
   return line.includes('\t') ? '\t' : ',';
@@ -191,7 +234,7 @@ function splitDelimLine(line, delim) {
   return line.split(delim).map((s) => s.trim());
 }
 
-function rowToBooking(obj, rooms) {
+function rowToBooking(obj, rooms, scripts = SCRIPTS_SEED) {
   const categoryLabel = (obj['類型'] || '自家場').trim();
   const categoryEntry = Object.entries(CATEGORY_META).find(([, m]) => m.label === categoryLabel);
   const category = categoryEntry ? categoryEntry[0] : 'own';
@@ -239,10 +282,29 @@ function rowToBooking(obj, rooms) {
   const timeEnd = (obj['結束時間'] || '').trim();
   if (!timeStart || !timeEnd) throw new Error('開始時間與結束時間都必須填寫');
 
+  /* 雜支格式「項目:金額」，多筆用 ; 分隔，例如 餐費:600;印刷:150 */
+  const expensesRaw = (obj['雜支'] || '').trim();
+  const expenses = expensesRaw
+    ? expensesRaw.split(';').filter(Boolean).map((piece) => {
+      const parts = piece.split(':');
+      return {
+        id: uid('ex'),
+        item: (parts[0] || '其他').trim(),
+        amount: parts[1] !== undefined && parts[1].trim() !== '' ? Number(parts[1]) : '',
+        note: (parts[2] || '').trim(),
+      };
+    }).filter((e) => e.item)
+    : [];
+
+  const scriptMatch = findScript(scripts, activityName);
+
   return {
     id: uid('bk'), category, date, roomId, venueName,
     slots, timeStart, timeEnd,
     activityName,
+    scriptId: scriptMatch ? scriptMatch.id : '',
+    headcount: (obj['人數'] || '').trim(),
+    expenses,
     personName: (obj['預約人'] || '').trim(),
     contact: (obj['聯絡方式'] || '').trim(),
     hosts: category === 'rentOut' ? [] : (hosts.length ? hosts : [{ id: uid('h'), name: '', role: '主持', wage: '', wagePaid: 'unpaid' }]),
@@ -259,7 +321,7 @@ function rowToBooking(obj, rooms) {
   };
 }
 
-function parseImportText(text, rooms) {
+function parseImportText(text, rooms, scripts = SCRIPTS_SEED) {
   const cleaned = text.replace(/^\uFEFF/, '');
   const lines = cleaned.split(/\r?\n/).filter((l) => l.trim() !== '');
   if (lines.length < 2) return { rows: [], errors: [{ row: 0, reason: '至少需要標題列加一筆資料' }] };
@@ -272,111 +334,12 @@ function parseImportText(text, rooms) {
     const obj = {};
     headers.forEach((h, idx) => { obj[h] = cells[idx] !== undefined ? cells[idx] : ''; });
     try {
-      rows.push(rowToBooking(obj, rooms));
+      rows.push(rowToBooking(obj, rooms, scripts));
     } catch (err) {
       errors.push({ row: i + 1, reason: err.message });
     }
   }
   return { rows, errors };
-}
-
-/* --------------------------------- 示範資料 --------------------------------- */
-
-function seedBookings(rooms) {
-  const find = (code) => rooms.find((r) => r.code === code) || rooms[0];
-  return [
-    {
-      id: uid('bk'), category: 'own', date: '2026-06-18', roomId: find('5F內').id,
-      venueName: '', slots: ['晚'], timeStart: '19:00', timeEnd: '23:00', activityName: '季風吹過橘色的海',
-      personName: '', contact: '',
-      hosts: [{ id: uid('h'), name: 'bobo', role: '主持', wage: 1500, wagePaid: 'paid' }], hostNote: '',
-      ownAmount: 3600, paymentStatus: 'paid', feeType: 'fixed', feeRate: '', feeHours: '',
-      feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '',
-    },
-    {
-      id: uid('bk'), category: 'own', date: '2026-06-20', roomId: find('4F全').id,
-      venueName: '', slots: ['中', '晚'], timeStart: '13:00', timeEnd: '22:00', activityName: '無名之町 上+下',
-      personName: '', contact: '',
-      hosts: [
-        { id: uid('h'), name: '沙拉', role: '主持', wage: 1800, wagePaid: 'unpaid' },
-        { id: uid('h'), name: '小宇', role: 'NPC', wage: 800, wagePaid: 'paid' },
-      ], hostNote: '',
-      ownAmount: 4200, paymentStatus: 'unpaid', feeType: 'fixed', feeRate: '', feeHours: '',
-      feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '上下半場跨中晚兩個時段',
-    },
-    {
-      id: uid('bk'), category: 'rentOut', date: '2026-06-19', roomId: find('5F外').id,
-      venueName: '', slots: ['中'], timeStart: '13:00', timeEnd: '18:00', activityName: '告別詩',
-      personName: 'Sharon', contact: 'LINE: sharon_888',
-      hosts: [], hostNote: '', ownAmount: '',
-      paymentStatus: 'unpaid', feeType: 'fixed', feeRate: 600, feeHours: 4,
-      feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '',
-    },
-    {
-      id: uid('bk'), category: 'rentOut', date: '2026-06-25', roomId: find('5F全').id,
-      venueName: '', slots: ['早'], timeStart: '10:00', timeEnd: '15:00', activityName: '二流貨色',
-      personName: '三月工作室', contact: 'LINE: march_studio',
-      hosts: [], hostNote: '', ownAmount: '',
-      paymentStatus: 'paid', feeType: 'share', feeRate: '', feeHours: '',
-      feeRevenue: 8000, feePercentage: 30, feeManualAmount: '', notes: '',
-    },
-    {
-      id: uid('bk'), category: 'borrowed', date: '2026-06-22', roomId: '',
-      venueName: '阿明的密室基地', slots: ['晚'], timeStart: '19:30', timeEnd: '22:30',
-      activityName: '月迷津渡', personName: '', contact: '',
-      hosts: [{ id: uid('h'), name: '沙拉', role: '主持', wage: 1600, wagePaid: 'unpaid' }], hostNote: '',
-      ownAmount: 3000, paymentStatus: 'paid', feeType: 'fixed', feeRate: '',
-      feeHours: '', feeRevenue: '', feePercentage: '', feeManualAmount: '',
-      notes: '在夥伴場地支援一場',
-    },
-    {
-      id: uid('bk'), category: 'rentOut', date: '2026-06-13', roomId: find('5F中').id,
-      venueName: '', slots: ['晚'], timeStart: '19:00', timeEnd: '23:00', activityName: '我鍾意你包場活動',
-      personName: '佳怡', contact: 'LINE: jiayi_room',
-      hosts: [], hostNote: '', ownAmount: '',
-      paymentStatus: 'unpaid', feeType: 'fixed', feeRate: 600, feeHours: 3,
-      feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '',
-    },
-    {
-      id: uid('bk'), category: 'own', date: '2026-06-24', roomId: find('4F全').id,
-      venueName: '', slots: ['晚'], timeStart: '19:00', timeEnd: '23:00', activityName: '世紀末的最後一場雪',
-      personName: '', contact: '',
-      hosts: [{ id: uid('h'), name: 'bobo', role: '主持', wage: 1500, wagePaid: 'unpaid' }], hostNote: '',
-      ownAmount: 3600, paymentStatus: 'unpaid', feeType: 'fixed', feeRate: '', feeHours: '',
-      feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '',
-    },
-  ];
-}
-
-function seedPending(rooms) {
-  const room = rooms.find((r) => r.code === '5F中') || rooms[0];
-  return [
-    {
-      id: uid('pd'), status: 'pending', submittedAt: new Date().toISOString(),
-      partnerName: '佳怡', contact: 'LINE: jiayi_room',
-      preferredDate: '2026-06-29', preferredRoomId: room.id, preferredSlot: '晚',
-      preferredTimeStart: '19:00', preferredTimeEnd: '23:00',
-      activityName: '告別詩', estimatedHours: 4, notes: '晚上7點開始,預計4小時',
-    },
-  ];
-}
-
-function seedStaffDirectory() {
-  return {
-    'bobo': '1234', '沙拉': '0000', '小宇': '5678',
-    'Sharon': '8888', '三月工作室': '2025', '佳怡': '6666',
-  };
-}
-
-function seedFeedback() {
-  return [
-    {
-      id: uid('fb'), hostName: 'bobo', activityName: '季風吹過橘色的海',
-      feedbackType: '道具不足',
-      content: '花束道具有點舊了，可以補新的嗎？另外結局信封只剩2份，要再印一些。',
-      submittedAt: new Date(Date.now() - 86400000 * 2).toISOString(), status: 'new',
-    },
-  ];
 }
 
 /* --------------------------------- 小元件 --------------------------------- */
@@ -426,13 +389,29 @@ function PaymentChip({ status, onClick, clickable, labels }) {
   );
 }
 
-function MonthNav({ year, month, onPrev, onNext }) {
+function MonthNav({ year, month, onPrev, onNext, years = [], onPickYear }) {
+  /* 下拉一定要包含目前檢視的年份，否則切到沒有場次的年份時會顯示成空白 */
+  const yearOptions = Array.from(new Set([...years, year])).sort((a, b) => a - b);
   return (
     <div className="month-nav">
       <button type="button" className="icon-btn" onClick={onPrev} aria-label="上個月">
         <ChevronLeft size={18} />
       </button>
-      <div className="month-label">{year} 年 {month} 月</div>
+      <div className="month-label">
+        {onPickYear ? (
+          <select
+            className="year-select"
+            value={year}
+            onChange={(e) => onPickYear(Number(e.target.value))}
+            aria-label="切換年份"
+          >
+            {yearOptions.map((y) => <option key={y} value={y}>{y} 年</option>)}
+          </select>
+        ) : (
+          <span>{year} 年</span>
+        )}
+        <span className="month-label-month">{month} 月</span>
+      </div>
       <button type="button" className="icon-btn" onClick={onNext} aria-label="下個月">
         <ChevronRight size={18} />
       </button>
@@ -522,6 +501,7 @@ function SessionCard({
   const isRentOutSelf = booking.category === 'rentOut' && normViewer && (booking.personName || '').trim().toLowerCase() === normViewer;
   const showTotal = showMoney && (!normViewer || isRentOutSelf);
   const totalAmount = computeAmount(booking);
+  const expenseTotal = computeExpenses(booking);
   const personLabel = booking.category === 'rentOut' ? '租場夥伴' : '預約人';
   const totalLabel = booking.category === 'rentOut' ? '場地費' : '收費金額';
 
@@ -585,7 +565,22 @@ function SessionCard({
       {showTotal && (
         <div className="person-line">
           <Wallet size={13} />
-          <span>{totalLabel}：{formatMoney(totalAmount)}</span>
+          <span>
+            {totalLabel}：{formatMoney(totalAmount)}
+            {Number(booking.headcount) > 0 && <span className="headcount-tag">{booking.headcount} 人</span>}
+          </span>
+        </div>
+      )}
+
+      {showMoney && !normViewer && expenseTotal > 0 && (
+        <div className="person-line expense-line">
+          <Receipt size={13} />
+          <span>
+            雜支：{formatMoney(expenseTotal)}
+            <span className="expense-detail">
+              （{getExpenses(booking).filter((e) => Number(e.amount) > 0).map((e) => `${e.item} ${formatMoney(e.amount)}`).join('、')}）
+            </span>
+          </span>
         </div>
       )}
 
@@ -661,13 +656,28 @@ function HostsEditor({ hosts, onChange }) {
   );
 }
 
-function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
+function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
   const [data, setData] = useState(initialData);
   const [error, setError] = useState('');
 
   function set(field, value) {
     setData((d) => ({ ...d, [field]: value }));
   }
+
+  function pickScript(scriptId) {
+    setData((d) => {
+      const script = findScript(scripts, scriptId);
+      return {
+        ...d,
+        scriptId: script ? script.id : '',
+        activityName: script ? script.title : d.activityName,
+      };
+    });
+  }
+
+  const estimated = estimateAmount(data, scripts);
+  const entered = Number(data.ownAmount) || 0;
+  const hasGap = estimated > 0 && entered > 0 && entered !== estimated;
   function toggleSlot(key) {
     setData((d) => {
       const current = d.slots || [];
@@ -769,10 +779,14 @@ function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
             </div>
           )}
 
-          <div className="field span2">
-            <label>活動／劇本名稱</label>
-            <input type="text" value={data.activityName} onChange={(e) => set('activityName', e.target.value)} />
-          </div>
+          <ScriptPicker
+            scripts={scripts}
+            scriptId={data.scriptId || data.activityName}
+            activityName={data.activityName}
+            date={data.date}
+            onPick={pickScript}
+            onFreeText={(value) => set('activityName', value)}
+          />
 
           <div className="field">
             <label>{data.category === 'rentOut' ? '租場夥伴' : '預約人 / 顧客'}</label>
@@ -804,10 +818,39 @@ function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
           </div>
 
           {data.category !== 'rentOut' && (
-            <div className="field span2">
-              <label>收費金額（向顧客收取，NT$）</label>
-              <input type="number" value={data.ownAmount} onChange={(e) => set('ownAmount', e.target.value)} />
-            </div>
+            <>
+              <div className="field">
+                <label>人數</label>
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="實際到場人數"
+                  value={data.headcount ?? ''}
+                  onChange={(e) => set('headcount', e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label>收費金額（實收，NT$）</label>
+                <input type="number" value={data.ownAmount} onChange={(e) => set('ownAmount', e.target.value)} />
+              </div>
+              {estimated > 0 && (
+                <div className="field span2 estimate-line">
+                  <span>
+                    自動試算：{data.headcount} 人 × {formatMoney(estimated / (Number(data.headcount) || 1))}
+                    （{isHolidayDate(data.date) ? '假日價' : '平日價'}）＝ <strong>{formatMoney(estimated)}</strong>
+                  </span>
+                  <button type="button" className="btn-ghost small" onClick={() => set('ownAmount', String(estimated))}>
+                    <Calculator size={12} /> 帶入實收
+                  </button>
+                  {hasGap && (
+                    <span className="estimate-gap">
+                      與實收差 {formatMoney(Math.abs(estimated - entered))}
+                      （{entered < estimated ? '折扣／退費' : '加購'}）
+                    </span>
+                  )}
+                </div>
+              )}
+            </>
           )}
 
           {data.category === 'rentOut' && (
@@ -859,6 +902,17 @@ function SessionForm({ initialData, rooms, mode, onCancel, onSave }) {
               </div>
             </>
           )}
+
+          <div className="field span2">
+            <label>雜支（餐費、印刷、道具補充…，可記多筆）</label>
+            <ExpensesEditor expenses={data.expenses} onChange={(expenses) => set('expenses', expenses)} />
+          </div>
+
+          <div className="field span2 cost-summary">
+            本場支出合計：主持人薪資 {formatMoney(computeWages(data))}
+            ＋ 雜支 {formatMoney(computeExpenses(data))}
+            ＝ <strong>{formatMoney(computeCost(data))}</strong>
+          </div>
 
           <div className="field span2">
             <label>備註（選填）</label>
@@ -966,6 +1020,312 @@ function TextEditRow({ label, value, defaultValue, onSave, onReset }) {
   );
 }
 
+/* --------------------------------- 雜支編輯器（共用元件） --------------------------------- */
+
+function ExpensesEditor({ expenses, onChange }) {
+  const list = Array.isArray(expenses) ? expenses : [];
+  function updateExpense(idx, field, value) {
+    onChange(list.map((e, i) => (i === idx ? { ...e, [field]: value } : e)));
+  }
+  function addExpense(item = '') {
+    onChange([...list, { id: uid('ex'), item, amount: '', note: '' }]);
+  }
+  function removeExpense(idx) {
+    onChange(list.filter((_, i) => i !== idx));
+  }
+  const total = list.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+  return (
+    <div className="expenses-block">
+      {list.length === 0 && <div className="hint small">這場目前沒有雜支紀錄。點下面的項目快速加一筆。</div>}
+
+      {list.map((e, idx) => (
+        <div className="expense-row" key={e.id || idx}>
+          <input
+            type="text"
+            placeholder="項目"
+            value={e.item}
+            onChange={(ev) => updateExpense(idx, 'item', ev.target.value)}
+          />
+          <input
+            type="number"
+            placeholder="金額"
+            value={e.amount}
+            onChange={(ev) => updateExpense(idx, 'amount', ev.target.value)}
+          />
+          <input
+            type="text"
+            placeholder="備註（選填）"
+            value={e.note || ''}
+            onChange={(ev) => updateExpense(idx, 'note', ev.target.value)}
+          />
+          <button type="button" className="icon-btn danger-outline" onClick={() => removeExpense(idx)} aria-label="移除">
+            <X size={14} />
+          </button>
+        </div>
+      ))}
+
+      <div className="expense-presets">
+        {EXPENSE_PRESETS.map((preset) => (
+          <button type="button" key={preset} className="preset-chip" onClick={() => addExpense(preset)}>
+            <Plus size={11} /> {preset}
+          </button>
+        ))}
+      </div>
+
+      {list.length > 0 && (
+        <div className="expense-total">雜支合計：<strong>{formatMoney(total)}</strong></div>
+      )}
+    </div>
+  );
+}
+
+/* --------------------------------- 劇本選單（共用元件） --------------------------------- */
+
+function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeText }) {
+  const activeScripts = scripts.filter((s) => s.active !== false);
+  const grouped = SCRIPT_CATEGORIES
+    .map((category) => ({ category, items: activeScripts.filter((s) => s.category === category) }))
+    .filter((g) => g.items.length > 0);
+  const uncategorized = activeScripts.filter((s) => !SCRIPT_CATEGORIES.includes(s.category));
+  const picked = findScript(scripts, scriptId);
+  /* 選單沒選到、但有舊的手打名稱時，維持自由輸入模式，不要把舊資料蓋掉 */
+  const isCustom = !picked;
+
+  return (
+    <>
+      <div className="field span2">
+        <label>劇本（從劇本庫選，選不到可用下面的自訂名稱）</label>
+        <select value={picked ? picked.id : ''} onChange={(e) => onPick(e.target.value)}>
+          <option value="">— 自訂／非劇本活動 —</option>
+          {grouped.map((g) => (
+            <optgroup key={g.category} label={g.category}>
+              {g.items.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title}（{s.players}／{s.duration}）
+                </option>
+              ))}
+            </optgroup>
+          ))}
+          {uncategorized.length > 0 && (
+            <optgroup label="其他">
+              {uncategorized.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+            </optgroup>
+          )}
+        </select>
+        {picked && (
+          <div className="script-meta-line">
+            {picked.category}・{picked.players}・{picked.duration}
+            {unitPriceOf(picked, date) > 0 && (
+              <>　單價 {formatMoney(unitPriceOf(picked, date))}／人（{isHolidayDate(date) ? '假日' : '平日'}）</>
+            )}
+          </div>
+        )}
+      </div>
+
+      {isCustom && (
+        <div className="field span2">
+          <label>活動／劇本名稱（自訂）</label>
+          <input type="text" value={activityName} onChange={(e) => onFreeText(e.target.value)} />
+        </div>
+      )}
+    </>
+  );
+}
+
+/* --------------------------------- 劇本攤提表 --------------------------------- */
+
+function ScriptAmortTable({ stats }) {
+  const rows = stats
+    .filter((s) => s.invested > 0 || s.sessionCount > 0)
+    .sort((a, b) => b.invested - a.invested || b.sessionCount - a.sessionCount);
+
+  if (rows.length === 0) {
+    return <div className="empty-state"><Calculator size={28} /><p>還沒有可以攤提的劇本</p></div>;
+  }
+
+  return (
+    <div className="table-scroll">
+      <table className="edit-table amort-table">
+        <thead>
+          <tr>
+            <th>劇本</th><th>投入成本</th><th>已開場次</th><th>單場攤提</th>
+            <th>累積收入</th><th>累積支出</th><th>扣除投入後損益</th><th>回本進度</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((s) => {
+            const recovered = s.invested > 0 && s.grossProfit >= s.invested;
+            const percent = s.recoveryRate === null ? null : Math.round(s.recoveryRate * 100);
+            return (
+              <tr key={s.script.id}>
+                <td className="amort-title">
+                  {s.script.title}
+                  <span className="amort-sub">{s.script.category}</span>
+                </td>
+                <td>{s.invested > 0 ? formatMoney(s.invested) : '—'}</td>
+                <td>{s.sessionCount}</td>
+                <td>{s.invested > 0 && s.sessionCount > 0 ? formatMoney(s.perSession) : '—'}</td>
+                <td>{formatMoney(s.revenue)}</td>
+                <td>{formatMoney(s.wages + s.expenses)}</td>
+                <td className={s.netProfit >= 0 ? 'amort-positive' : 'amort-negative'}>
+                  {formatMoney(s.netProfit)}
+                </td>
+                <td>
+                  {percent === null ? (
+                    <span className="amort-sub">未填成本</span>
+                  ) : (
+                    <div className="recovery-cell">
+                      <div className="recovery-bar">
+                        <span
+                          className={recovered ? 'recovery-fill done' : 'recovery-fill'}
+                          style={{ width: `${Math.max(Math.min(percent, 100), 0)}%` }}
+                        />
+                      </div>
+                      <span className="recovery-text">{percent}%</span>
+                    </div>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/* --------------------------------- 劇本庫單列 --------------------------------- */
+
+function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
+  const [open, setOpen] = useState(false);
+  const { script, cost, invested, sessionCount, perSession, grossProfit } = stat;
+  const recovered = invested > 0 && grossProfit >= invested;
+
+  return (
+    <div className={`script-card ${script.active === false ? 'inactive' : ''}`}>
+      <button type="button" className="script-card-head" onClick={() => setOpen((v) => !v)}>
+        <div className="script-card-main">
+          <span className="script-card-title">{script.title || '（未命名劇本）'}</span>
+          <span className="script-card-meta">
+            {script.category}
+            {script.players ? `・${script.players}` : ''}
+            {script.duration ? `・${script.duration}` : ''}
+            {script.partner ? `・${script.partner}` : ''}
+            {script.active === false ? '・已下架' : ''}
+          </span>
+        </div>
+        <div className="script-card-stats">
+          <span className="script-stat"><em>{sessionCount}</em> 場</span>
+          <span className="script-stat">
+            投入 <em>{invested > 0 ? formatMoney(invested) : '—'}</em>
+          </span>
+          <span className="script-stat">
+            單場攤提 <em>{invested > 0 && sessionCount > 0 ? formatMoney(perSession) : '—'}</em>
+          </span>
+          {invested > 0 && (
+            <span className={recovered ? 'script-badge done' : 'script-badge'}>
+              {recovered ? '已回本' : `回收 ${Math.max(Math.round((grossProfit / invested) * 100), 0)}%`}
+            </span>
+          )}
+        </div>
+        <ChevronRight size={16} className={open ? 'chev open' : 'chev'} />
+      </button>
+
+      {open && (
+        <div className="script-card-body">
+          <div className="sub-heading small">劇本資料（會出現在新增場次的下拉選單）</div>
+          <div className="form-grid">
+            <div className="field span2">
+              <label>劇本名稱</label>
+              <input type="text" value={script.title} onChange={(e) => onChangeField(script.id, 'title', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>類型</label>
+              <select value={script.category} onChange={(e) => onChangeField(script.id, 'category', e.target.value)}>
+                {SCRIPT_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+            <div className="field">
+              <label>人數</label>
+              <input type="text" placeholder="例如 6人" value={script.players || ''} onChange={(e) => onChangeField(script.id, 'players', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>時長</label>
+              <input type="text" placeholder="例如 5-6小時" value={script.duration || ''} onChange={(e) => onChangeField(script.id, 'duration', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>合作私團（選填）</label>
+              <input type="text" value={script.partner || ''} onChange={(e) => onChangeField(script.id, 'partner', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>平日價（每人）</label>
+              <input type="number" value={script.priceWeekday ?? ''} onChange={(e) => onChangeField(script.id, 'priceWeekday', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>假日價（每人）</label>
+              <input type="number" value={script.priceHoliday ?? ''} onChange={(e) => onChangeField(script.id, 'priceHoliday', e.target.value)} />
+            </div>
+            <div className="field span2">
+              <label className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={script.active !== false}
+                  onChange={(e) => onChangeField(script.id, 'active', e.target.checked)}
+                />
+                仍在上架（取消勾選後不會出現在新增場次的選單，但歷史紀錄會保留）
+              </label>
+            </div>
+          </div>
+
+          <div className="sub-heading small">一次性投入成本（只有管理者看得到）</div>
+          <div className="form-grid">
+            <div className="field">
+              <label>劇本費／授權金</label>
+              <input type="number" value={cost.scriptCost} onChange={(e) => onChangeCost(script.id, 'scriptCost', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>道具費</label>
+              <input type="number" value={cost.propCost} onChange={(e) => onChangeCost(script.id, 'propCost', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>其他投入（印刷、服裝…）</label>
+              <input type="number" value={cost.otherCost} onChange={(e) => onChangeCost(script.id, 'otherCost', e.target.value)} />
+            </div>
+            <div className="field">
+              <label>購入日期</label>
+              <input type="date" value={cost.purchasedAt} onChange={(e) => onChangeCost(script.id, 'purchasedAt', e.target.value)} />
+            </div>
+            <div className="field span2">
+              <label>成本備註（選填）</label>
+              <input type="text" value={cost.costNote} onChange={(e) => onChangeCost(script.id, 'costNote', e.target.value)} />
+            </div>
+          </div>
+
+          <div className="script-amort-summary">
+            <div>投入合計：<strong>{formatMoney(invested)}</strong></div>
+            <div>已開 <strong>{sessionCount}</strong> 場</div>
+            <div>單場攤提：<strong>{invested > 0 && sessionCount > 0 ? formatMoney(perSession) : '—'}</strong></div>
+            <div>
+              累積毛利（收入 − 薪資 − 雜支）：<strong>{formatMoney(grossProfit)}</strong>
+            </div>
+            <div className={stat.netProfit >= 0 ? 'amort-positive' : 'amort-negative'}>
+              扣除投入後損益：<strong>{formatMoney(stat.netProfit)}</strong>
+            </div>
+            {stat.lastDate && <div>最近一場：{formatDateFull(stat.lastDate)}</div>}
+          </div>
+
+          <div className="script-card-actions">
+            <button type="button" className="btn-ghost small danger-text" onClick={() => onRemove(script.id)}>
+              <Trash2 size={13} /> 移除這本
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* --------------------------------- 提醒清單列 --------------------------------- */
 
 function ReminderRow({ item, type, reminded, onToggle, rooms }) {
@@ -1013,6 +1373,8 @@ export default function BoothBookingApp() {
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
   const [pageTexts, setPageTexts] = useState({});
+  const [scripts, setScripts] = useState(SCRIPTS_SEED);
+  const [scriptCosts, setScriptCosts] = useState({});
   const [tab, setTab] = useState('overview');
 
   const [adminUnlocked, setAdminUnlocked] = useState(false);
@@ -1026,7 +1388,15 @@ export default function BoothBookingApp() {
   const [adminUser, setAdminUser] = useState(null);
   const [currentProfile, setCurrentProfile] = useState(null);
   const registrationInProgress = useRef(false);
+  const scriptSaveTimer = useRef(null);
+  const costSaveTimer = useRef(null);
   const [migrationState, setMigrationState] = useState('idle');
+
+  /* 離開頁面時把還沒送出的劇本庫變更清掉，避免 timer 在卸載後才觸發 */
+  useEffect(() => () => {
+    clearTimeout(scriptSaveTimer.current);
+    clearTimeout(costSaveTimer.current);
+  }, []);
 
   const todayD = new Date();
   const [viewYear, setViewYear] = useState(todayD.getFullYear());
@@ -1037,7 +1407,6 @@ export default function BoothBookingApp() {
   const [modal, setModal] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [confirmRejectId, setConfirmRejectId] = useState(null);
-  const [confirmReset, setConfirmReset] = useState(false);
 
   const [reqForm, setReqForm] = useState({
     partnerName: '', contact: '', preferredDate: '', preferredRoomId: '',
@@ -1076,6 +1445,8 @@ export default function BoothBookingApp() {
         setRooms(Array.isArray(publicData.rooms) && publicData.rooms.length ? publicData.rooms : ROOMS_DEFAULT);
         setBookings(publicData.bookings || []);
         setPageTexts(publicData.pageTexts || {});
+        /* 還沒建過劇本庫就先用官網抓下來的預設清單，管理者第一次存檔後才寫進 Firestore */
+        setScripts(Array.isArray(publicData.scripts) && publicData.scripts.length ? publicData.scripts : SCRIPTS_SEED);
       } catch (error) {
         console.error('公開資料載入失敗', error);
       }
@@ -1136,6 +1507,24 @@ export default function BoothBookingApp() {
   function persistSyncConfig(next) {
     setSyncConfig(next);
     if (adminUnlocked) savePrivateConfig({ syncConfig: next }).catch((error) => console.error('同步設定儲存失敗', error));
+  }
+  /* 劇本庫是逐字輸入的，直接寫 Firestore 會變成每打一個字送一次請求。
+     這裡延遲 700ms 再寫，期間又有輸入就重新計時。 */
+  function persistScripts(next) {
+    setScripts(next);
+    if (!adminUnlocked) return;
+    clearTimeout(scriptSaveTimer.current);
+    scriptSaveTimer.current = setTimeout(() => {
+      saveScriptCatalog(next).catch((error) => console.error('劇本庫儲存失敗', error));
+    }, 700);
+  }
+  function persistScriptCosts(next) {
+    setScriptCosts(next);
+    if (!adminUnlocked) return;
+    clearTimeout(costSaveTimer.current);
+    costSaveTimer.current = setTimeout(() => {
+      savePrivateConfig({ scriptCosts: next }).catch((error) => console.error('劇本成本儲存失敗', error));
+    }, 700);
   }
 
   function exportBackup() {
@@ -1330,6 +1719,7 @@ export default function BoothBookingApp() {
           setAccessRequests(data.accessRequests || []);
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
+          setScriptCosts(data.scriptCosts || {});
         } else {
           if (!user.emailVerified) {
             setAdminLoginError('請先到信箱完成 Email 驗證，再回來登入');
@@ -1430,6 +1820,7 @@ export default function BoothBookingApp() {
       setFeedbackList(data.feedback || []);
       setReminderLog(data.reminderLog || {});
       setSyncConfig(data.syncConfig || {});
+      setScriptCosts(data.scriptCosts || {});
       setMigrationState('done');
       window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
     } catch (error) {
@@ -1491,8 +1882,9 @@ export default function BoothBookingApp() {
     return {
       id: uid('bk'), category: 'own', date: presetDate || todayStr(),
       roomId: rooms[0]?.id || '', venueName: '', slots: ['早'], timeStart: '', timeEnd: '',
-      activityName: '', personName: '', contact: '',
+      activityName: '', scriptId: '', headcount: '', personName: '', contact: '',
       hosts: [{ id: uid('h'), name: '', role: '主持', wage: '', wagePaid: 'unpaid' }], hostNote: '',
+      expenses: [],
       ownAmount: '', paymentStatus: 'unpaid', feeType: 'fixed', feeRate: '', feeHours: '',
       feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: '',
     };
@@ -1507,7 +1899,22 @@ export default function BoothBookingApp() {
         : [{ id: uid('h'), name: '', role: '主持', wage: '', wagePaid: 'unpaid' }]);
     const timeStart = b.timeStart || b.time || '';
     const timeEnd = b.timeEnd || '';
-    setModal({ mode: 'edit', data: { ...b, hosts, hostNote: b.hostNote || '', slots: getSlotsList(b), timeStart, timeEnd } });
+    /* 舊場次沒有 scriptId，用活動名稱回頭對一次劇本庫，對得到就自動補上 */
+    const matched = findScript(scripts, b.scriptId || b.activityName);
+    setModal({
+      mode: 'edit',
+      data: {
+        ...b,
+        hosts,
+        hostNote: b.hostNote || '',
+        slots: getSlotsList(b),
+        timeStart,
+        timeEnd,
+        scriptId: matched ? matched.id : (b.scriptId || ''),
+        headcount: b.headcount ?? '',
+        expenses: getExpenses(b),
+      },
+    });
   }
   function openApprove(request) {
     const room = rooms.find((r) => r.id === request.preferredRoomId) || rooms[0];
@@ -1518,8 +1925,10 @@ export default function BoothBookingApp() {
         id: uid('bk'), category: 'rentOut', date: request.preferredDate || todayStr(),
         roomId: room?.id || '', venueName: '', slots: [request.preferredSlot || '早'],
         timeStart: request.preferredTimeStart || '', timeEnd: request.preferredTimeEnd || '',
-        activityName: request.activityName || '', personName: request.partnerName || '',
-        contact: request.contact || '', hosts: [], hostNote: '', ownAmount: '', paymentStatus: 'unpaid',
+        activityName: request.activityName || '', scriptId: '', headcount: '',
+        personName: request.partnerName || '',
+        contact: request.contact || '', hosts: [], hostNote: '', expenses: [],
+        ownAmount: '', paymentStatus: 'unpaid',
         feeType: 'fixed', feeRate: '', feeHours: request.estimatedHours || '',
         feeRevenue: '', feePercentage: '', feeManualAmount: '', notes: request.notes || '',
       },
@@ -1607,7 +2016,7 @@ export default function BoothBookingApp() {
     reader.readAsText(file);
   }
   function handlePreviewImport() {
-    setImportResult(parseImportText(importText, rooms));
+    setImportResult(parseImportText(importText, rooms, scripts));
     setImportDone(null);
   }
   function handleConfirmImport() {
@@ -1643,6 +2052,16 @@ export default function BoothBookingApp() {
   }
   function removeFromQueue(id) {
     setQuickQueue((q) => q.filter((b) => b.id !== id));
+  }
+  function pickQuickScript(scriptId) {
+    setQuickForm((f) => {
+      const script = findScript(scripts, scriptId);
+      return {
+        ...f,
+        scriptId: script ? script.id : '',
+        activityName: script ? script.title : f.activityName,
+      };
+    });
   }
   function toggleQuickSlot(key) {
     setQuickForm((f) => {
@@ -1725,20 +2144,6 @@ export default function BoothBookingApp() {
     setConfirmDeleteId(null);
   }
 
-  function doReset() {
-    const sb = seedBookings(rooms);
-    const sp = seedPending(rooms);
-    const ssd = seedStaffDirectory();
-    const sfb = seedFeedback();
-    persistBookings(sb);
-    persistPending(sp);
-    persistStaff(ssd);
-    persistFeedback(sfb);
-    persistReminderLog({});
-    persistPageTexts({});
-    setConfirmReset(false);
-  }
-
   function gotoMonth(newYear, newMonth) {
     setViewYear(newYear);
     setViewMonth(newMonth);
@@ -1754,6 +2159,7 @@ export default function BoothBookingApp() {
     if (viewMonth === 12) gotoMonth(viewYear + 1, 1);
     else gotoMonth(viewYear, viewMonth + 1);
   }
+  function pickYear(year) { gotoMonth(year, viewMonth); }
 
   const bookingsByDate = useMemo(() => {
     const map = {};
@@ -1765,6 +2171,17 @@ export default function BoothBookingApp() {
   }, [bookings]);
 
   const selectedDayItems = bookingsByDate[selectedDate] || [];
+  const quickEstimate = estimateAmount(quickForm, scripts);
+
+  /* 有場次的年份 + 今年，給年份下拉選單用 */
+  const availableYears = useMemo(() => {
+    const set = new Set([new Date().getFullYear()]);
+    bookings.forEach((b) => {
+      const year = Number((b.date || '').slice(0, 4));
+      if (year) set.add(year);
+    });
+    return Array.from(set).sort((a, b) => a - b);
+  }, [bookings]);
 
   const sortedDraft = useMemo(() => {
     return [...tableDraft].sort((a, b) => a.date.localeCompare(b.date) || (slotsSortKey(a) - slotsSortKey(b)));
@@ -1951,6 +2368,114 @@ export default function BoothBookingApp() {
     return { total, paid, unpaid };
   }, [hostWageGroups]);
 
+  /* ---------- 雜支統計（當月，依項目分類） ---------- */
+
+  const expenseGroups = useMemo(() => {
+    const prefix = `${viewYear}-${pad2(viewMonth)}`;
+    const map = {};
+    bookings
+      .filter((b) => b.date && b.date.startsWith(prefix))
+      .forEach((b) => {
+        getExpenses(b).forEach((e) => {
+          const amount = Number(e.amount) || 0;
+          if (!amount) return;
+          const key = (e.item || '其他').trim() || '其他';
+          if (!map[key]) map[key] = { items: [], total: 0 };
+          map[key].items.push({ booking: b, expense: e, amount });
+          map[key].total += amount;
+        });
+      });
+    Object.values(map).forEach((g) => g.items.sort((a, b) => a.booking.date.localeCompare(b.booking.date)));
+    return map;
+  }, [bookings, viewYear, viewMonth]);
+
+  const expenseOverall = useMemo(
+    () => Object.values(expenseGroups).reduce((sum, g) => sum + g.total, 0),
+    [expenseGroups],
+  );
+
+  /* ---------- 劇本攤提統計（全部歷史，不限當月） ---------- */
+
+  const scriptStats = useMemo(() => {
+    /* 先把每場次歸到它的劇本底下 */
+    const byScript = {};
+    bookings.forEach((b) => {
+      if (b.category === 'rentOut') return; // 出租場是別人的本，不算我們的攤提
+      const script = findScript(scripts, b.scriptId || b.activityName);
+      if (!script) return;
+      if (!byScript[script.id]) byScript[script.id] = [];
+      byScript[script.id].push(b);
+    });
+
+    return scripts.map((script) => {
+      const sessions = byScript[script.id] || [];
+      const cost = { ...EMPTY_SCRIPT_COST, ...(scriptCosts[script.id] || {}) };
+      const invested = (Number(cost.scriptCost) || 0)
+        + (Number(cost.propCost) || 0)
+        + (Number(cost.otherCost) || 0);
+      const sessionCount = sessions.length;
+      const revenue = sessions.reduce((sum, b) => sum + computeAmount(b), 0);
+      const wages = sessions.reduce((sum, b) => sum + computeWages(b), 0);
+      const expenses = sessions.reduce((sum, b) => sum + computeExpenses(b), 0);
+      /* 單場攤提＝一次性投入 ÷ 已開場次數；還沒開過就等於全額未攤提 */
+      const perSession = sessionCount > 0 ? invested / sessionCount : invested;
+      /* 毛利＝收入 −（薪資＋雜支），再扣掉一次性投入才是真正的損益 */
+      const grossProfit = revenue - wages - expenses;
+      const netProfit = grossProfit - invested;
+      const recoveryRate = invested > 0 ? Math.min(grossProfit / invested, 10) : null;
+      const lastDate = sessions.map((b) => b.date).sort().slice(-1)[0] || '';
+      return {
+        script, cost, invested, sessionCount, revenue, wages, expenses,
+        perSession, grossProfit, netProfit, recoveryRate, lastDate,
+      };
+    });
+  }, [scripts, scriptCosts, bookings]);
+
+  const scriptStatsById = useMemo(
+    () => Object.fromEntries(scriptStats.map((s) => [s.script.id, s])),
+    [scriptStats],
+  );
+
+  const scriptInvestTotal = useMemo(
+    () => scriptStats.reduce((sum, s) => sum + s.invested, 0),
+    [scriptStats],
+  );
+  const scriptUnrecovered = useMemo(
+    () => scriptStats.reduce((sum, s) => sum + Math.max(s.invested - s.grossProfit, 0), 0),
+    [scriptStats],
+  );
+
+  /* ---------- 劇本庫編輯 ---------- */
+
+  function updateScriptCost(scriptId, field, value) {
+    persistScriptCosts({
+      ...scriptCosts,
+      [scriptId]: { ...EMPTY_SCRIPT_COST, ...(scriptCosts[scriptId] || {}), [field]: value },
+    });
+  }
+  function updateScriptField(scriptId, field, value) {
+    persistScripts(scripts.map((s) => (s.id === scriptId ? { ...s, [field]: value } : s)));
+  }
+  function addScript() {
+    const newScript = {
+      id: uid('sc'), title: '', category: SCRIPT_CATEGORIES[0], players: '', duration: '',
+      priceWeekday: '', priceHoliday: '', partner: '', active: true,
+    };
+    persistScripts([...scripts, newScript]);
+  }
+  function removeScript(scriptId) {
+    const stat = scriptStatsById[scriptId];
+    if (stat && stat.sessionCount > 0) {
+      window.alert(`這本已經有 ${stat.sessionCount} 場紀錄，刪掉會讓那些場次對不到劇本。\n建議改成「已下架」就好。`);
+      return;
+    }
+    if (!window.confirm('確定要從劇本庫移除這一本嗎？')) return;
+    persistScripts(scripts.filter((s) => s.id !== scriptId));
+    const nextCosts = { ...scriptCosts };
+    delete nextCosts[scriptId];
+    persistScriptCosts(nextCosts);
+  }
+
   function csvEscape(val) {
     const s = String(val === undefined || val === null ? '' : val);
     if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
@@ -1987,9 +2512,33 @@ export default function BoothBookingApp() {
       rows.push(['主持人薪資', name, '', '小計', '', g.total, '']);
     });
 
-    rows.push(['總結', '', '', '場次收入＋出租收入', '', sessionIncomeOverall.total + financeOverall.total, '']);
+    Object.keys(expenseGroups).sort((a, b) => a.localeCompare(b, 'zh-Hant')).forEach((item) => {
+      const g = expenseGroups[item];
+      g.items.forEach(({ booking: b, expense, amount }) => {
+        const roomLabel = b.category === 'borrowed' ? b.venueName : ((rooms.find((r) => r.id === b.roomId) || {}).code || '');
+        rows.push(['雜支', item, b.date, b.activityName, roomLabel, amount, expense.note || '']);
+      });
+      rows.push(['雜支', item, '', '小計', '', g.total, '']);
+    });
+
+    const income = sessionIncomeOverall.total + financeOverall.total;
+    rows.push(['總結', '', '', '場次收入＋出租收入', '', income, '']);
     rows.push(['總結', '', '', '主持人／NPC 薪資', '', hostWageOverall.total, '']);
-    rows.push(['總結', '', '', '收支餘額', '', sessionIncomeOverall.total + financeOverall.total - hostWageOverall.total, '']);
+    rows.push(['總結', '', '', '雜支合計', '', expenseOverall, '']);
+    rows.push(['總結', '', '', '收支餘額', '', income - hostWageOverall.total - expenseOverall, '']);
+
+    rows.push([]);
+    rows.push(['劇本攤提（全部歷史，不限本月）']);
+    rows.push(['劇本', '類型', '投入成本', '已開場次', '單場攤提', '累積收入', '累積薪資', '累積雜支', '扣除投入後損益']);
+    scriptStats
+      .filter((s) => s.invested > 0 || s.sessionCount > 0)
+      .sort((a, b) => b.invested - a.invested)
+      .forEach((s) => {
+        rows.push([
+          s.script.title, s.script.category, s.invested, s.sessionCount,
+          Math.round(s.perSession), s.revenue, s.wages, s.expenses, s.netProfit,
+        ]);
+      });
 
     const csv = rows.map((r) => r.map(csvEscape).join(',')).join('\r\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
@@ -2044,6 +2593,7 @@ export default function BoothBookingApp() {
       badge: accessRequests.filter((item) => item.status === 'pending').length,
     });
     tabs.push({ key: 'reminders', label: '提醒清單', Icon: Bell, badge: nightList.length });
+    tabs.push({ key: 'scripts', label: '劇本庫', Icon: BookOpen });
     tabs.push({ key: 'import', label: '新增場次', Icon: Upload });
     tabs.push({ key: 'texts', label: '頁面文字', Icon: FileText });
   }
@@ -2139,7 +2689,7 @@ export default function BoothBookingApp() {
         {tab === 'overview' && (
           <section>
             {getText('overview_hint') && <p className="hint">{getText('overview_hint')}</p>}
-            <MonthNav year={viewYear} month={viewMonth} onPrev={prevMonth} onNext={nextMonth} />
+            <MonthNav year={viewYear} month={viewMonth} onPrev={prevMonth} onNext={nextMonth} years={availableYears} onPickYear={pickYear} />
             <CategoryLegend />
 
             <div className="view-toggle">
@@ -2239,7 +2789,7 @@ export default function BoothBookingApp() {
                     <thead>
                       <tr>
                         <th>日期</th><th>時段</th><th>開始時間</th><th>結束時間</th><th>類型</th><th>包廂/場地</th><th>活動／劇本名稱</th>
-                        <th>預約人</th><th>主持人／對方主持人</th><th>金額</th><th>收款</th><th>備註</th><th>操作</th>
+                        <th>人數</th><th>預約人</th><th>主持人／對方主持人</th><th>金額</th><th>雜支</th><th>收款</th><th>備註</th><th>操作</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -2277,6 +2827,14 @@ export default function BoothBookingApp() {
                             />
                           </td>
                           <td><input type="text" value={b.activityName} onChange={(e) => updateDraftField(b.id, 'activityName', e.target.value)} /></td>
+                          <td className="narrow-cell">
+                            <input
+                              type="number"
+                              min="0"
+                              value={b.headcount ?? ''}
+                              onChange={(e) => updateDraftField(b.id, 'headcount', e.target.value)}
+                            />
+                          </td>
                           <td><input type="text" value={b.personName} onChange={(e) => updateDraftField(b.id, 'personName', e.target.value)} /></td>
                           <td>
                             <input
@@ -2288,6 +2846,12 @@ export default function BoothBookingApp() {
                             />
                           </td>
                           <td><input type="number" value={amountValue(b)} onChange={(e) => updateDraftAmount(b.id, e.target.value)} /></td>
+                          <td className="narrow-cell expense-cell">
+                            {computeExpenses(b) > 0 ? formatMoney(computeExpenses(b)) : '—'}
+                            <button type="button" className="icon-btn" onClick={() => openEdit(b)} aria-label="編輯雜支">
+                              <Receipt size={13} />
+                            </button>
+                          </td>
                           <td>
                             <select value={b.paymentStatus} onChange={(e) => updateDraftField(b.id, 'paymentStatus', e.target.value)}>
                               <option value="unpaid">未收</option>
@@ -2320,21 +2884,6 @@ export default function BoothBookingApp() {
               </div>
             )}
 
-            {adminUnlocked && (
-              <div className="reset-row">
-                {confirmReset ? (
-                  <div className="confirm-inline">
-                    <span>確定要重置為示範資料？這會覆蓋目前所有場次、申請、回饋與密碼設定。</span>
-                    <button type="button" className="btn-ghost small" onClick={() => setConfirmReset(false)}>取消</button>
-                    <button type="button" className="btn-danger small" onClick={doReset}>確定重置</button>
-                  </div>
-                ) : (
-                  <button type="button" className="btn-ghost small" onClick={() => setConfirmReset(true)}>
-                    <RotateCcw size={13} /> 重置為示範資料
-                  </button>
-                )}
-              </div>
-            )}
           </section>
         )}
 
@@ -2678,7 +3227,7 @@ export default function BoothBookingApp() {
           <section>
             <h2>金額總覽</h2>
             {getText('finance_hint') && <p className="hint">{getText('finance_hint')}</p>}
-            <MonthNav year={viewYear} month={viewMonth} onPrev={prevMonth} onNext={nextMonth} />
+            <MonthNav year={viewYear} month={viewMonth} onPrev={prevMonth} onNext={nextMonth} years={availableYears} onPickYear={pickYear} />
 
             <button type="button" className="btn-ghost wide export-btn" onClick={exportFinanceCsv}>
               <Download size={15} /> 匯出本月完整財務報表 CSV
@@ -2688,8 +3237,13 @@ export default function BoothBookingApp() {
             <div className="stat-row">
               <div className="stat-box paid"><div className="stat-label">總收入</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total + financeOverall.total)}</div></div>
               <div className="stat-box unpaid"><div className="stat-label">主持人／NPC 薪資</div><div className="stat-value">{formatMoney(hostWageOverall.total)}</div></div>
-              <div className="stat-box"><div className="stat-label">收支餘額</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total + financeOverall.total - hostWageOverall.total)}</div></div>
+              <div className="stat-box unpaid"><div className="stat-label">雜支</div><div className="stat-value">{formatMoney(expenseOverall)}</div></div>
+              <div className="stat-box"><div className="stat-label">收支餘額</div><div className="stat-value">{formatMoney(sessionIncomeOverall.total + financeOverall.total - hostWageOverall.total - expenseOverall)}</div></div>
             </div>
+            <p className="hint small">
+              收支餘額只算當月的現金進出，沒有把劇本與道具的一次性投入算進去。
+              那部分要看下面的「劇本成本攤提」，或到「劇本庫」分頁看每一本的回本狀況。
+            </p>
 
             <div className="sub-heading">自家場／外借場收入</div>
             <div className="stat-row">
@@ -2800,6 +3354,118 @@ export default function BoothBookingApp() {
                   ))}
                 </div>
               ))}
+
+            <div className="sub-heading">雜支－依項目統計</div>
+            <div className="stat-row">
+              <div className="stat-box unpaid">
+                <div className="stat-label">本月雜支合計</div>
+                <div className="stat-value">{formatMoney(expenseOverall)}</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">項目種類</div>
+                <div className="stat-value">{Object.keys(expenseGroups).length}</div>
+              </div>
+            </div>
+
+            {Object.keys(expenseGroups).length === 0 && (
+              <div className="empty-state"><Receipt size={28} /><p>這個月沒有雜支紀錄</p></div>
+            )}
+
+            {Object.entries(expenseGroups)
+              .sort((a, b) => b[1].total - a[1].total)
+              .map(([item, g]) => (
+                <div key={item} className="finance-group">
+                  <div className="finance-group-head">
+                    <span className="finance-name">{item}</span>
+                    <span className="finance-subtotal">{formatMoney(g.total)}</span>
+                  </div>
+                  {g.items.map(({ booking: b, expense, amount }) => (
+                    <div key={b.id + (expense.id || expense.item)} className="finance-row">
+                      <div className="finance-row-left">
+                        <span className="finance-date">{formatDateShort(b.date)}</span>
+                        <span className="finance-activity">
+                          {b.activityName}{expense.note ? `（${expense.note}）` : ''}
+                        </span>
+                      </div>
+                      <div className="finance-row-right">
+                        <span className="finance-fee">{formatMoney(amount)}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+
+            <div className="sub-heading">劇本成本攤提（全部歷史，不限本月）</div>
+            <div className="stat-row">
+              <div className="stat-box">
+                <div className="stat-label">劇本＋道具總投入</div>
+                <div className="stat-value">{formatMoney(scriptInvestTotal)}</div>
+              </div>
+              <div className="stat-box unpaid">
+                <div className="stat-label">尚未回收</div>
+                <div className="stat-value">{formatMoney(scriptUnrecovered)}</div>
+              </div>
+              <div className="stat-box paid">
+                <div className="stat-label">已回本本數</div>
+                <div className="stat-value">
+                  {scriptStats.filter((s) => s.invested > 0 && s.grossProfit >= s.invested).length}
+                  {' / '}
+                  {scriptStats.filter((s) => s.invested > 0).length}
+                </div>
+              </div>
+            </div>
+
+            {scriptInvestTotal === 0 ? (
+              <div className="empty-state">
+                <Calculator size={28} />
+                <p>還沒填過劇本成本</p>
+                <p className="hint small">到「劇本庫」分頁填入每一本的劇本費與道具費，這裡就會算出攤提與回本進度。</p>
+              </div>
+            ) : (
+              <ScriptAmortTable stats={scriptStats} />
+            )}
+          </section>
+        )}
+
+        {tab === 'scripts' && adminUnlocked && (
+          <section>
+            <h2>劇本庫</h2>
+            <p className="hint">
+              這裡是新增場次時那個下拉選單的來源。預設已經帶入官網上的 {SCRIPTS_SEED.length} 本，
+              填上每一本的劇本費與道具費之後，系統會依「已開場次數」自動算出單場攤提成本與回本進度。
+              成本欄位只有管理者看得到，不會出現在公開頁面。
+            </p>
+
+            <div className="stat-row">
+              <div className="stat-box">
+                <div className="stat-label">劇本總數</div>
+                <div className="stat-value">{scripts.length}</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-label">總投入成本</div>
+                <div className="stat-value">{formatMoney(scriptInvestTotal)}</div>
+              </div>
+              <div className="stat-box unpaid">
+                <div className="stat-label">尚未回收</div>
+                <div className="stat-value">{formatMoney(scriptUnrecovered)}</div>
+              </div>
+            </div>
+
+            <div className="script-list">
+              {scriptStats.map((stat) => (
+                <ScriptLibraryRow
+                  key={stat.script.id}
+                  stat={stat}
+                  onChangeField={updateScriptField}
+                  onChangeCost={updateScriptCost}
+                  onRemove={removeScript}
+                />
+              ))}
+            </div>
+
+            <button type="button" className="btn-ghost wide" onClick={addScript}>
+              <Plus size={15} /> 新增一本劇本
+            </button>
           </section>
         )}
 
@@ -2981,10 +3647,14 @@ export default function BoothBookingApp() {
                   </div>
                 )}
 
-                <div className="field span2">
-                  <label>活動／劇本名稱</label>
-                  <input type="text" value={quickForm.activityName} onChange={(e) => setQuickForm((f) => ({ ...f, activityName: e.target.value }))} />
-                </div>
+                <ScriptPicker
+                  scripts={scripts}
+                  scriptId={quickForm.scriptId || quickForm.activityName}
+                  activityName={quickForm.activityName}
+                  date={quickForm.date}
+                  onPick={pickQuickScript}
+                  onFreeText={(value) => setQuickForm((f) => ({ ...f, activityName: value }))}
+                />
 
                 <div className="field">
                   <label>{quickForm.category === 'rentOut' ? '租場夥伴' : '預約人 / 顧客（可留空）'}</label>
@@ -2998,6 +3668,40 @@ export default function BoothBookingApp() {
                   </select>
                 </div>
 
+                {quickForm.category !== 'rentOut' && (
+                  <>
+                    <div className="field">
+                      <label>人數</label>
+                      <input
+                        type="number"
+                        min="0"
+                        value={quickForm.headcount ?? ''}
+                        onChange={(e) => setQuickForm((f) => ({ ...f, headcount: e.target.value }))}
+                      />
+                    </div>
+                    <div className="field">
+                      <label>收費金額（實收，NT$）</label>
+                      <input
+                        type="number"
+                        value={quickForm.ownAmount}
+                        onChange={(e) => setQuickForm((f) => ({ ...f, ownAmount: e.target.value }))}
+                      />
+                    </div>
+                    {quickEstimate > 0 && (
+                      <div className="field span2 estimate-line">
+                        <span>自動試算：<strong>{formatMoney(quickEstimate)}</strong>（{isHolidayDate(quickForm.date) ? '假日價' : '平日價'}）</span>
+                        <button
+                          type="button"
+                          className="btn-ghost small"
+                          onClick={() => setQuickForm((f) => ({ ...f, ownAmount: String(quickEstimate) }))}
+                        >
+                          <Calculator size={12} /> 帶入實收
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+
                 {quickForm.category === 'rentOut' ? (
                   <div className="field span2">
                     <label>對方主持人（選填）</label>
@@ -3009,6 +3713,14 @@ export default function BoothBookingApp() {
                     <HostsEditor hosts={quickForm.hosts} onChange={(hosts) => setQuickForm((f) => ({ ...f, hosts }))} />
                   </div>
                 )}
+
+                <div className="field span2">
+                  <label>雜支（選填，可記多筆）</label>
+                  <ExpensesEditor
+                    expenses={quickForm.expenses}
+                    onChange={(expenses) => setQuickForm((f) => ({ ...f, expenses }))}
+                  />
+                </div>
 
                 <div className="field span2">
                   <label>備註（選填）</label>
@@ -3138,6 +3850,7 @@ export default function BoothBookingApp() {
           key={modal.data.id + modal.mode}
           initialData={modal.data}
           rooms={rooms}
+          scripts={scripts}
           mode={modal.mode}
           onCancel={closeModal}
           onSave={handleSaveModal}
@@ -3339,7 +4052,6 @@ const baseStyles = `
 .pay-unpaid { background: #FBE7DE; color: #B4583E; }
 .pay-unpaid .pay-dot { background: #E08F6B; }
 
-.reset-row { margin-top: 20px; text-align: center; }
 
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(91,64,50,0.45);
@@ -3570,6 +4282,93 @@ const baseStyles = `
 .text-edit-actions { display: flex; gap: 8px; }
 
 .footer-note { text-align: center; color: #BFA89A; font-size: 0.72rem; padding: 20px 16px 4px; }
+
+/* ---------- 年份切換 ---------- */
+.month-label { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.year-select {
+  background: #FFF3EA; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 2px 6px; font-size: 0.95rem; color: #5B4032;
+  font-family: 'Noto Serif TC', serif; cursor: pointer;
+}
+.month-label-month { white-space: nowrap; }
+
+/* ---------- 雜支 ---------- */
+.expenses-block { display: flex; flex-direction: column; gap: 6px; }
+.expense-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.expense-row input {
+  background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 6px 8px; font-size: 0.85rem; color: #5B4032; flex: 1; min-width: 90px;
+}
+.expense-row input[type="number"] { max-width: 110px; flex: 0 0 110px; }
+.expense-presets { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 2px; }
+.preset-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  background: #FFF3EA; border: 1px dashed #E9C9CE; border-radius: 20px;
+  padding: 3px 10px; font-size: 0.74rem; color: #A98C7A; cursor: pointer;
+}
+.preset-chip:hover { border-color: #C45D72; color: #C45D72; }
+.expense-total { font-size: 0.82rem; color: #5B4032; text-align: right; }
+.expense-line .expense-detail { color: #A98C7A; font-size: 0.75rem; }
+.headcount-tag {
+  display: inline-block; margin-left: 8px; background: #FFF3EA;
+  border-radius: 20px; padding: 1px 8px; font-size: 0.72rem; color: #A98C7A;
+}
+.cost-summary {
+  background: #FFF3EA; border-radius: 10px; padding: 10px 12px;
+  font-size: 0.82rem; color: #5B4032;
+}
+.estimate-line {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: #F3F8F4; border-radius: 10px; padding: 8px 12px; font-size: 0.8rem; color: #4A6B55;
+}
+.estimate-gap { color: #C45D72; font-size: 0.76rem; }
+.narrow-cell { max-width: 90px; }
+.expense-cell { white-space: nowrap; font-size: 0.78rem; color: #5B4032; }
+
+/* ---------- 劇本庫 ---------- */
+.script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
+.script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.script-card { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; overflow: hidden; }
+.script-card.inactive { opacity: 0.6; }
+.script-card-head {
+  width: 100%; display: flex; align-items: center; gap: 10px; padding: 11px 13px;
+  background: none; border: none; cursor: pointer; text-align: left; font-family: inherit;
+}
+.script-card-main { flex: 1; min-width: 0; }
+.script-card-title { display: block; font-weight: 700; font-size: 0.9rem; color: #5B4032; }
+.script-card-meta { display: block; font-size: 0.73rem; color: #A98C7A; margin-top: 2px; }
+.script-card-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.script-stat { font-size: 0.73rem; color: #A98C7A; white-space: nowrap; }
+.script-stat em { font-style: normal; font-weight: 700; color: #5B4032; }
+.script-badge {
+  background: #FDEEF0; color: #C45D72; border-radius: 20px;
+  padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;
+}
+.script-badge.done { background: #E6F3EA; color: #3E7B52; }
+.chev { color: #C9B0A2; transition: transform 0.15s; flex-shrink: 0; }
+.chev.open { transform: rotate(90deg); }
+.script-card-body { padding: 4px 13px 14px; border-top: 1px dashed #F0DCDF; }
+.sub-heading.small { font-size: 0.78rem; margin: 12px 0 6px; }
+.inline-check { display: flex; align-items: center; gap: 6px; font-size: 0.78rem; color: #5B4032; }
+.inline-check input { width: auto; }
+.script-amort-summary {
+  display: flex; flex-wrap: wrap; gap: 6px 18px; background: #FFF3EA;
+  border-radius: 10px; padding: 10px 12px; font-size: 0.8rem; color: #5B4032; margin-top: 10px;
+}
+.script-card-actions { margin-top: 10px; display: flex; justify-content: flex-end; }
+.danger-text { color: #C4555A; }
+
+/* ---------- 攤提表 ---------- */
+.amort-table { min-width: 860px; }
+.amort-title { font-weight: 700; color: #5B4032; white-space: nowrap; }
+.amort-sub { display: block; font-weight: 400; font-size: 0.71rem; color: #A98C7A; }
+.amort-positive { color: #3E7B52; font-weight: 700; }
+.amort-negative { color: #C4555A; font-weight: 700; }
+.recovery-cell { display: flex; align-items: center; gap: 7px; min-width: 110px; }
+.recovery-bar { flex: 1; height: 6px; background: #F0DCDF; border-radius: 20px; overflow: hidden; }
+.recovery-fill { display: block; height: 100%; background: #E0A0AE; border-radius: 20px; }
+.recovery-fill.done { background: #7FB08F; }
+.recovery-text { font-size: 0.73rem; color: #A98C7A; white-space: nowrap; }
 
 :focus-visible { outline: 2px solid #D6677C; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
