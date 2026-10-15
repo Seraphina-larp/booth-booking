@@ -2592,11 +2592,20 @@ export default function BoothBookingApp() {
     const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
     const counts = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, 0]));
     bookings.filter(inYear).forEach((b) => {
+      /* 劇本庫優先：之前歸到「其他」的名稱，只要那本後來上架了（或被設成別名），
+         就會在這裡被劇本接手，不再計入其他場次，避免同一場被數兩次。 */
+      if (findScript(scripts, b.scriptId || b.activityName)) return;
       const bucket = otherNameMap[(b.activityName || '').trim()];
       if (bucket && counts[bucket] !== undefined) counts[bucket] += 1;
     });
     return counts;
-  }, [bookings, otherNameMap, scriptYearFilter]);
+  }, [bookings, scripts, otherNameMap, scriptYearFilter]);
+
+  /* 已經被劇本庫接手、但分類表裡還留著的舊名稱（純粹是殘留，不影響數字） */
+  const staleOtherNames = useMemo(
+    () => Object.keys(otherNameMap).filter((name) => findScript(scripts, name)),
+    [otherNameMap, scripts],
+  );
 
   function assignAlias(name, scriptId) {
     if (!scriptId) return;
@@ -2752,9 +2761,17 @@ export default function BoothBookingApp() {
 
       merged = merged.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-Hant'));
       persistScripts(merged);
+
+      /* 官網新上架的本，如果名稱先前被歸到「其他」，同步後就該交還給劇本庫 */
+      const reclaimed = Object.keys(otherNameMap).filter((name) => findScript(merged, name));
+      if (reclaimed.length > 0) {
+        const nextMap = { ...otherNameMap };
+        reclaimed.forEach((name) => { delete nextMap[name]; });
+        persistOtherNameMap(nextMap);
+      }
       setScriptSyncResult({
         ok: true, source: payload.source, count: incoming.length,
-        added, updated, missing,
+        added, updated, missing, reclaimed,
       });
     } catch (error) {
       setScriptSyncResult({ ok: false, message: error.message });
@@ -3769,6 +3786,8 @@ export default function BoothBookingApp() {
                       ・更新 {scriptSyncResult.updated.length} 本
                       {scriptSyncResult.missing.length > 0
                         && `・官網上沒有但已保留 ${scriptSyncResult.missing.length} 本（${scriptSyncResult.missing.join('、')}）`}
+                      {(scriptSyncResult.reclaimed || []).length > 0
+                        && `・${scriptSyncResult.reclaimed.length} 筆原本歸在「其他」的場次已交還劇本庫（${scriptSyncResult.reclaimed.join('、')}）`}
                     </div>
                   </div>
                 </div>
@@ -3864,6 +3883,26 @@ export default function BoothBookingApp() {
             <button type="button" className="btn-ghost wide" onClick={addScript}>
               <Plus size={15} /> 新增一本劇本
             </button>
+
+            {staleOtherNames.length > 0 && (
+              <div className="reclaim-row">
+                <span>
+                  {staleOtherNames.length} 個原本歸在「其他」的名稱已經在劇本庫裡了，
+                  場次已自動算回該本（{staleOtherNames.join('、')}）。
+                </span>
+                <button
+                  type="button"
+                  className="btn-ghost small"
+                  onClick={() => {
+                    const next = { ...otherNameMap };
+                    staleOtherNames.forEach((name) => { delete next[name]; });
+                    persistOtherNameMap(next);
+                  }}
+                >
+                  清掉舊分類
+                </button>
+              </div>
+            )}
 
             {unmatchedNames.length > 0 && (
               <details className="unmatched-fold">
@@ -4914,6 +4953,12 @@ const baseStyles = `
   margin-left: 8px; background: #FDEEF0; color: #C45D72;
   border-radius: 20px; padding: 1px 9px; font-size: 0.72rem; font-weight: 400;
 }
+.reclaim-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  background: #F3F8F4; border-radius: 10px; padding: 10px 13px;
+  font-size: 0.8rem; color: #4A6B55; margin-top: 16px;
+}
+.reclaim-row span { flex: 1; min-width: 200px; line-height: 1.5; }
 .unmatched-fold { margin-top: 22px; border-top: 1px dashed #E9C9CE; padding-top: 14px; }
 .unmatched-fold > summary {
   cursor: pointer; font-family: 'Noto Serif TC', serif; font-size: 0.86rem;
