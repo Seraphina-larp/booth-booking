@@ -2575,6 +2575,20 @@ export default function BoothBookingApp() {
 
   const unmatchedActive = unmatchedNames.filter((n) => !n.ignored);
 
+  /* 歸到「其他」的場次：單次借場、評估後沒上架的試水溫場、包場活動等。
+     這些不屬於任何一本，但仍是真實發生過的場次，所以照樣計數，
+     只是依類型拆成「其他場次」與「其他出租場次」兩欄。 */
+  const otherStats = useMemo(() => {
+    const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
+    let own = 0;
+    let rental = 0;
+    bookings.filter(inYear).forEach((b) => {
+      if (!nonScriptNames.includes((b.activityName || '').trim())) return;
+      if (b.category === 'rentOut') rental += 1; else own += 1;
+    });
+    return { own, rental };
+  }, [bookings, nonScriptNames, scriptYearFilter]);
+
   function assignAlias(name, scriptId) {
     if (!scriptId) return;
     persistScripts(scripts.map((s) => {
@@ -3816,20 +3830,44 @@ export default function BoothBookingApp() {
                 <div className="stat-label">出租場</div>
                 <div className="stat-value">{scriptTotals.rental}</div>
               </div>
-              {scriptTotals.unmatched > 0 && (
+              {otherStats.own > 0 && (
                 <div className="stat-box">
-                  <div className="stat-label">未對應到劇本</div>
-                  <div className="stat-value">{scriptTotals.unmatched}</div>
+                  <div className="stat-label">其他場次</div>
+                  <div className="stat-value">{otherStats.own}</div>
+                </div>
+              )}
+              {otherStats.rental > 0 && (
+                <div className="stat-box">
+                  <div className="stat-label">其他出租場次</div>
+                  <div className="stat-value">{otherStats.rental}</div>
                 </div>
               )}
             </div>
 
+            <div className="sub-heading">劇本清單</div>
+            <div className="script-list">
+              {scriptStats.map((stat) => (
+                <ScriptLibraryRow
+                  key={stat.script.id}
+                  stat={stat}
+                  yearFilter={scriptYearFilter}
+                  onChangeField={updateScriptField}
+                  onChangeCost={updateScriptCost}
+                  onRemove={removeScript}
+                />
+              ))}
+            </div>
+
+            <button type="button" className="btn-ghost wide" onClick={addScript}>
+              <Plus size={15} /> 新增一本劇本
+            </button>
+
             {unmatchedNames.length > 0 && (
-              <>
-                <div className="sub-heading">
+              <details className="unmatched-fold">
+                <summary>
                   未對應到劇本的場次名稱
-                  {unmatchedActive.length > 0 && <span className="heading-count">{unmatchedActive.length} 種</span>}
-                </div>
+                  {unmatchedActive.length > 0 && <span className="heading-count">{unmatchedActive.length} 種待處理</span>}
+                </summary>
                 <div className="unmatched-list">
                   {unmatchedNames.map((item) => (
                     <div key={item.name} className={`unmatched-row ${item.ignored ? 'ignored' : ''}`}>
@@ -3845,7 +3883,9 @@ export default function BoothBookingApp() {
 
                       {item.ignored ? (
                         <div className="unmatched-actions">
-                          <span className="ignored-tag">非劇本活動</span>
+                          <span className="ignored-tag">
+                            已歸到{item.rental > 0 && item.own === 0 ? '其他出租場次' : '其他場次'}
+                          </span>
                           <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
                             復原
                           </button>
@@ -3878,33 +3918,16 @@ export default function BoothBookingApp() {
                             })}
                           </select>
                           <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
-                            非劇本活動
+                            歸到其他
                           </button>
                         </div>
                       )}
                     </div>
                   ))}
                 </div>
-              </>
+              </details>
             )}
 
-            <div className="sub-heading">劇本清單</div>
-            <div className="script-list">
-              {scriptStats.map((stat) => (
-                <ScriptLibraryRow
-                  key={stat.script.id}
-                  stat={stat}
-                  yearFilter={scriptYearFilter}
-                  onChangeField={updateScriptField}
-                  onChangeCost={updateScriptCost}
-                  onRemove={removeScript}
-                />
-              ))}
-            </div>
-
-            <button type="button" className="btn-ghost wide" onClick={addScript}>
-              <Plus size={15} /> 新增一本劇本
-            </button>
           </section>
         )}
 
@@ -4875,7 +4898,13 @@ const baseStyles = `
   margin-left: 8px; background: #FDEEF0; color: #C45D72;
   border-radius: 20px; padding: 1px 9px; font-size: 0.72rem; font-weight: 400;
 }
-.unmatched-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.unmatched-fold { margin-top: 22px; border-top: 1px dashed #E9C9CE; padding-top: 14px; }
+.unmatched-fold > summary {
+  cursor: pointer; font-family: 'Noto Serif TC', serif; font-size: 0.86rem;
+  color: #A98C7A; padding: 4px 0;
+}
+.unmatched-fold > summary::marker { color: #C9B0A2; }
+.unmatched-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 8px; }
 .unmatched-row {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; padding: 10px 13px;
