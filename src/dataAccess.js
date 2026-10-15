@@ -64,7 +64,9 @@ export async function loadAdminData() {
     reminderLog: config.reminderLog || {},
     syncConfig: config.syncConfig || {},
     scriptCosts: config.scriptCosts || {},
-    nonScriptNames: config.nonScriptNames || [],
+    /* 舊版只存「非劇本活動」名稱陣列，讀進來時一律轉成新的分類表 */
+    otherNameMap: config.otherNameMap
+      || (config.nonScriptNames || []).reduce((map, name) => ({ ...map, [name]: 'nonScript' }), {}),
   };
 }
 
