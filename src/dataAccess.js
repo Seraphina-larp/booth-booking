@@ -26,14 +26,16 @@ export function toPublicBooking(booking) {
 }
 
 export async function loadPublicData() {
-  const [roomsSnap, textsSnap, bookingSnap] = await Promise.all([
+  const [roomsSnap, textsSnap, scriptsSnap, bookingSnap] = await Promise.all([
     getDoc(doc(db, 'publicConfig', 'rooms')),
     getDoc(doc(db, 'publicConfig', 'pageTexts')),
+    getDoc(doc(db, 'publicConfig', 'scripts')),
     getDocs(collection(db, 'publicBookings')),
   ]);
   return {
     rooms: roomsSnap.exists() ? roomsSnap.data().value : null,
     pageTexts: textsSnap.exists() ? textsSnap.data().value : {},
+    scripts: scriptsSnap.exists() ? scriptsSnap.data().value : null,
     bookings: bookingSnap.docs.map((item) => ({ id: item.id, ...item.data() })),
   };
 }
@@ -61,6 +63,7 @@ export async function loadAdminData() {
     accessRequests: accessRequestSnap.docs.map((item) => ({ uid: item.id, ...item.data() })),
     reminderLog: config.reminderLog || {},
     syncConfig: config.syncConfig || {},
+    scriptCosts: config.scriptCosts || {},
   };
 }
 
@@ -183,6 +186,12 @@ export async function savePublicConfig(rooms, pageTexts) {
     setDoc(doc(db, 'publicConfig', 'rooms'), { value: rooms }),
     setDoc(doc(db, 'publicConfig', 'pageTexts'), { value: pageTexts }),
   ]);
+}
+
+/* 劇本目錄：公開讀取（下拉選單要用），只有管理者能寫入。
+   成本欄位不放這裡，改存 privateConfig，避免對外曝光。 */
+export async function saveScriptCatalog(scripts) {
+  await setDoc(doc(db, 'publicConfig', 'scripts'), { value: scripts });
 }
 
 export async function savePrivateConfig(data) {
