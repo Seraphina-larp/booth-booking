@@ -1375,6 +1375,8 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
+  const [scriptSyncing, setScriptSyncing] = useState(false);
+  const [scriptSyncResult, setScriptSyncResult] = useState(null);
   const [tab, setTab] = useState('overview');
 
   const [adminUnlocked, setAdminUnlocked] = useState(false);
@@ -2445,6 +2447,80 @@ export default function BoothBookingApp() {
     [scriptStats],
   );
 
+  /* ---------- 從官網同步劇本 ---------- */
+
+  async function syncScriptsFromSite() {
+    setScriptSyncing(true);
+    setScriptSyncResult(null);
+    try {
+      const response = await fetch('/api/scripts');
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.detail || payload.error || `伺服器回應 ${response.status}`);
+      }
+
+      const incoming = payload.scripts || [];
+      const normalize = (s) => String(s || '').replace(/[《》\s]/g, '');
+      const added = [];
+      const updated = [];
+
+      /* 以現有清單為底，逐一比對官網抓回來的資料。
+         關鍵：配對成功時一定沿用「既有的 id」，因為成本資料與場次都是靠 id 綁定的，
+         換 id 會讓已填的劇本費、道具費和歷史場次通通對不上。 */
+      let merged = [...scripts];
+      incoming.forEach((item) => {
+        const index = merged.findIndex(
+          (s) => s.id === item.id || normalize(s.title) === normalize(item.title),
+        );
+        if (index === -1) {
+          merged.push({ ...item, active: true });
+          added.push(item.title);
+          return;
+        }
+        const current = merged[index];
+        /* 官網沒抓到的欄位（例如沒標價的本）不要用空值蓋掉手動填過的資料 */
+        const keepIfBlank = (incomingValue, currentValue) => (
+          incomingValue === '' || incomingValue === undefined || incomingValue === null
+            ? currentValue
+            : incomingValue
+        );
+        const next = {
+          ...current,
+          title: keepIfBlank(item.title, current.title),
+          category: keepIfBlank(item.category, current.category),
+          players: keepIfBlank(item.players, current.players),
+          duration: keepIfBlank(item.duration, current.duration),
+          priceWeekday: keepIfBlank(item.priceWeekday, current.priceWeekday),
+          priceHoliday: keepIfBlank(item.priceHoliday, current.priceHoliday),
+          partner: keepIfBlank(item.partner, current.partner),
+          ...(item.url ? { url: item.url } : {}),
+        };
+        if (JSON.stringify(next) !== JSON.stringify(current)) {
+          updated.push(next.title);
+        }
+        merged[index] = next;
+      });
+
+      /* 官網上找不到的本一律保留，不自動刪除也不自動下架——
+         可能只是官網暫時撤下，但歷史場次和成本還需要它。 */
+      const incomingKeys = new Set(incoming.flatMap((i) => [i.id, normalize(i.title)]));
+      const missing = merged
+        .filter((s) => !incomingKeys.has(s.id) && !incomingKeys.has(normalize(s.title)))
+        .map((s) => s.title);
+
+      merged = merged.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-Hant'));
+      persistScripts(merged);
+      setScriptSyncResult({
+        ok: true, source: payload.source, count: incoming.length,
+        added, updated, missing,
+      });
+    } catch (error) {
+      setScriptSyncResult({ ok: false, message: error.message });
+    } finally {
+      setScriptSyncing(false);
+    }
+  }
+
   /* ---------- 劇本庫編輯 ---------- */
 
   function updateScriptCost(scriptId, field, value) {
@@ -3436,6 +3512,41 @@ export default function BoothBookingApp() {
               成本欄位只有管理者看得到，不會出現在公開頁面。
             </p>
 
+            <div className="sync-row">
+              <button type="button" className="btn-primary" onClick={syncScriptsFromSite} disabled={scriptSyncing}>
+                <Download size={15} /> {scriptSyncing ? '同步中…' : '從官網同步劇本'}
+              </button>
+              <span className="hint small">
+                會去 seraheyo.com 抓最新的劇本總覽，新本自動加進來、既有的更新名稱與價格。
+                你填過的成本資料和歷史場次不會被動到；官網上沒有的本也會保留。
+              </span>
+            </div>
+
+            {scriptSyncResult && (
+              scriptSyncResult.ok ? (
+                <div className="success-banner sync-banner">
+                  <Check size={18} />
+                  <div>
+                    <div>官網目前有 {scriptSyncResult.count} 本。</div>
+                    <div className="hint small">
+                      新增 {scriptSyncResult.added.length} 本
+                      {scriptSyncResult.added.length > 0 && `（${scriptSyncResult.added.join('、')}）`}
+                      ・更新 {scriptSyncResult.updated.length} 本
+                      {scriptSyncResult.missing.length > 0
+                        && `・官網上沒有但已保留 ${scriptSyncResult.missing.length} 本（${scriptSyncResult.missing.join('、')}）`}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="form-error sync-error">
+                  同步失敗：{scriptSyncResult.message}
+                  <div className="hint small">
+                    官網版型如果改了就可能抓不到。你還是可以在下面手動新增劇本，不會卡住。
+                  </div>
+                </div>
+              )
+            )}
+
             <div className="stat-row">
               <div className="stat-box">
                 <div className="stat-label">劇本總數</div>
@@ -4326,6 +4437,10 @@ const baseStyles = `
 .expense-cell { white-space: nowrap; font-size: 0.78rem; color: #5B4032; }
 
 /* ---------- 劇本庫 ---------- */
+.sync-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.sync-row .hint { flex: 1; min-width: 220px; margin: 0; }
+.sync-banner { align-items: flex-start; }
+.sync-error { line-height: 1.5; }
 .script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
 .script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .script-card { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; overflow: hidden; }
