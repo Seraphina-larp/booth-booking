@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import {
   EMPTY_SCRIPT_COST, SCRIPTS_SEED, SCRIPT_CATEGORIES,
-  findScript, isHolidayDate, unitPriceOf,
+  findScript, isHolidayDate, suggestScript, unitPriceOf,
 } from './scriptsData';
 import { auth } from './firebase';
 import {
@@ -1292,6 +1292,25 @@ function ScriptLibraryRow({ stat, yearFilter = 'all', onChangeField, onChangeCos
                 仍在上架（取消勾選後不會出現在新增場次的選單，但歷史紀錄會保留）
               </label>
             </div>
+            {(script.aliases || []).length > 0 && (
+              <div className="field span2">
+                <label>別名（這些舊名稱會自動歸到這本）</label>
+                <div className="alias-row">
+                  {(script.aliases || []).map((alias) => (
+                    <span key={alias} className="alias-chip">
+                      {alias}
+                      <button
+                        type="button"
+                        onClick={() => onChangeField(script.id, 'aliases', (script.aliases || []).filter((a) => a !== alias))}
+                        aria-label={`移除別名 ${alias}`}
+                      >
+                        <X size={11} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="sub-heading small">一次性投入成本（只有管理者看得到）</div>
@@ -1411,6 +1430,7 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
+  const [nonScriptNames, setNonScriptNames] = useState([]);
   const [scriptYearFilter, setScriptYearFilter] = useState('all');
   const [scriptSyncing, setScriptSyncing] = useState(false);
   const [scriptSyncResult, setScriptSyncResult] = useState(null);
@@ -1556,6 +1576,12 @@ export default function BoothBookingApp() {
     scriptSaveTimer.current = setTimeout(() => {
       saveScriptCatalog(next).catch((error) => console.error('劇本庫儲存失敗', error));
     }, 700);
+  }
+  function persistNonScriptNames(next) {
+    setNonScriptNames(next);
+    if (adminUnlocked) {
+      savePrivateConfig({ nonScriptNames: next }).catch((error) => console.error('非劇本活動清單儲存失敗', error));
+    }
   }
   function persistScriptCosts(next) {
     setScriptCosts(next);
@@ -1759,6 +1785,7 @@ export default function BoothBookingApp() {
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
           setScriptCosts(data.scriptCosts || {});
+          setNonScriptNames(data.nonScriptNames || []);
         } else {
           if (!user.emailVerified) {
             setAdminLoginError('請先到信箱完成 Email 驗證，再回來登入');
@@ -1860,6 +1887,7 @@ export default function BoothBookingApp() {
       setReminderLog(data.reminderLog || {});
       setSyncConfig(data.syncConfig || {});
       setScriptCosts(data.scriptCosts || {});
+      setNonScriptNames(data.nonScriptNames || []);
       setMigrationState('done');
       window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
     } catch (error) {
@@ -2503,14 +2531,70 @@ export default function BoothBookingApp() {
     bookings.filter(inYear).forEach((b) => {
       const script = findScript(scripts, b.scriptId || b.activityName);
       if (!script) {
-        unmatched += 1;
+        /* 已經標成「非劇本活動」的就不再提醒，否則數字永遠降不下來 */
+        if (!nonScriptNames.includes((b.activityName || '').trim())) unmatched += 1;
         return;
       }
       if (b.category === 'rentOut') rental += 1;
       else own += 1;
     });
     return { own, rental, total: own + rental, unmatched };
-  }, [bookings, scripts, scriptYearFilter]);
+  }, [bookings, scripts, scriptYearFilter, nonScriptNames]);
+
+  /* ---------- 對不到劇本的場次名稱 ----------
+     逐一列出不同的活動名稱與次數，並附上最接近的劇本建議。
+     使用者確認後寫成該本的別名（aliases），之後同名場次就會自動歸戶；
+     本來就不是劇本的（包場、主題聚會）可以標成「非劇本活動」收起來。 */
+
+  const unmatchedNames = useMemo(() => {
+    const map = {};
+    bookings.forEach((b) => {
+      if (findScript(scripts, b.scriptId || b.activityName)) return;
+      const name = (b.activityName || '').trim() || '（未填名稱）';
+      if (!map[name]) {
+        map[name] = { name, count: 0, own: 0, rental: 0, lastDate: '', years: new Set() };
+      }
+      const entry = map[name];
+      entry.count += 1;
+      if (b.category === 'rentOut') entry.rental += 1; else entry.own += 1;
+      if ((b.date || '') > entry.lastDate) entry.lastDate = b.date || '';
+      const year = (b.date || '').slice(0, 4);
+      if (year) entry.years.add(year);
+    });
+
+    return Object.values(map)
+      .map((entry) => ({
+        ...entry,
+        years: Array.from(entry.years).sort(),
+        suggestion: nonScriptNames.includes(entry.name) ? null : suggestScript(scripts, entry.name),
+        ignored: nonScriptNames.includes(entry.name),
+      }))
+      .sort((a, b) => Number(a.ignored) - Number(b.ignored) || b.count - a.count
+        || a.name.localeCompare(b.name, 'zh-Hant'));
+  }, [bookings, scripts, nonScriptNames]);
+
+  const unmatchedActive = unmatchedNames.filter((n) => !n.ignored);
+
+  function assignAlias(name, scriptId) {
+    if (!scriptId) return;
+    persistScripts(scripts.map((s) => {
+      /* 別名只掛在被選中的那本上，其他本若誤掛過同一個名稱就順手清掉 */
+      const aliases = (s.aliases || []).filter((a) => a !== name);
+      if (s.id === scriptId) return { ...s, aliases: [...aliases, name] };
+      return aliases.length === (s.aliases || []).length ? s : { ...s, aliases };
+    }));
+    if (nonScriptNames.includes(name)) {
+      persistNonScriptNames(nonScriptNames.filter((n) => n !== name));
+    }
+  }
+
+  function toggleNonScript(name) {
+    persistNonScriptNames(
+      nonScriptNames.includes(name)
+        ? nonScriptNames.filter((n) => n !== name)
+        : [...nonScriptNames, name],
+    );
+  }
 
   /* ---------- 租場夥伴場次統計 ----------
      有些合作私團（例如 eli 私團）在官網只掛一個總稱「豪門驚情系列」，
@@ -3740,6 +3824,70 @@ export default function BoothBookingApp() {
               )}
             </div>
 
+            {unmatchedNames.length > 0 && (
+              <>
+                <div className="sub-heading">
+                  未對應到劇本的場次名稱
+                  {unmatchedActive.length > 0 && <span className="heading-count">{unmatchedActive.length} 種</span>}
+                </div>
+                <div className="unmatched-list">
+                  {unmatchedNames.map((item) => (
+                    <div key={item.name} className={`unmatched-row ${item.ignored ? 'ignored' : ''}`}>
+                      <div className="unmatched-main">
+                        <span className="unmatched-name">{item.name}</span>
+                        <span className="unmatched-meta">
+                          {item.count} 場
+                          {item.rental > 0 && `（自家 ${item.own}・出租 ${item.rental}）`}
+                          {item.years.length > 0 && `・${item.years.join('、')}`}
+                          {item.lastDate && `・最近 ${formatDateShort(item.lastDate)}`}
+                        </span>
+                      </div>
+
+                      {item.ignored ? (
+                        <div className="unmatched-actions">
+                          <span className="ignored-tag">非劇本活動</span>
+                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
+                            復原
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="unmatched-actions">
+                          {item.suggestion && (
+                            <button
+                              type="button"
+                              className="btn-primary small"
+                              onClick={() => assignAlias(item.name, item.suggestion.script.id)}
+                            >
+                              <Check size={12} /> 對應到《{item.suggestion.script.title}》
+                            </button>
+                          )}
+                          <select
+                            value=""
+                            onChange={(e) => assignAlias(item.name, e.target.value)}
+                            aria-label="手動指定劇本"
+                          >
+                            <option value="">手動指定…</option>
+                            {SCRIPT_CATEGORIES.map((category) => {
+                              const items = scripts.filter((s) => s.category === category);
+                              if (items.length === 0) return null;
+                              return (
+                                <optgroup key={category} label={category}>
+                                  {items.map((s) => <option key={s.id} value={s.id}>{s.title}</option>)}
+                                </optgroup>
+                              );
+                            })}
+                          </select>
+                          <button type="button" className="btn-ghost small" onClick={() => toggleNonScript(item.name)}>
+                            非劇本活動
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             <div className="sub-heading">劇本清單</div>
             <div className="script-list">
               {scriptStats.map((stat) => (
@@ -4721,6 +4869,35 @@ const baseStyles = `
 .year-filter-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
 .year-filter-label { font-size: 0.8rem; color: #A98C7A; white-space: nowrap; }
 .year-filter-row .hint { flex-basis: 100%; margin: 0; }
+
+/* ---------- 未對應場次名稱 ---------- */
+.heading-count {
+  margin-left: 8px; background: #FDEEF0; color: #C45D72;
+  border-radius: 20px; padding: 1px 9px; font-size: 0.72rem; font-weight: 400;
+}
+.unmatched-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }
+.unmatched-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; padding: 10px 13px;
+}
+.unmatched-row.ignored { opacity: 0.55; background: #FAF6F1; }
+.unmatched-main { flex: 1; min-width: 180px; }
+.unmatched-name { display: block; font-weight: 700; font-size: 0.86rem; color: #5B4032; }
+.unmatched-meta { display: block; font-size: 0.72rem; color: #A98C7A; margin-top: 2px; }
+.unmatched-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.unmatched-actions select {
+  background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 5px 8px; font-size: 0.78rem; color: #5B4032; max-width: 150px;
+}
+.ignored-tag { font-size: 0.73rem; color: #A98C7A; }
+.alias-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.alias-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #FFF3EA; border: 1px solid #E9C9CE; border-radius: 20px;
+  padding: 2px 6px 2px 10px; font-size: 0.75rem; color: #5B4032;
+}
+.alias-chip button { background: none; border: none; cursor: pointer; color: #C9B0A2; display: flex; padding: 2px; }
+.alias-chip button:hover { color: #C4555A; }
 
 /* ---------- 租場夥伴場次 ---------- */
 .partner-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 18px; }

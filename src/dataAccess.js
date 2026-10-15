@@ -64,6 +64,7 @@ export async function loadAdminData() {
     reminderLog: config.reminderLog || {},
     syncConfig: config.syncConfig || {},
     scriptCosts: config.scriptCosts || {},
+    nonScriptNames: config.nonScriptNames || [],
   };
 }
 
