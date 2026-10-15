@@ -1149,8 +1149,8 @@ function ScriptAmortTable({ stats }) {
       <table className="edit-table amort-table">
         <thead>
           <tr>
-            <th>劇本</th><th>投入成本</th><th>已開場次</th><th>單場攤提</th>
-            <th>累積收入</th><th>累積支出</th><th>扣除投入後損益</th><th>回本進度</th>
+            <th>劇本</th><th>投入成本</th><th>總場次</th><th>自家場</th><th>出租場</th><th>單場攤提</th>
+            <th>自家場收入</th><th>累積支出</th><th>扣除投入後損益</th><th>回本進度</th>
           </tr>
         </thead>
         <tbody>
@@ -1165,7 +1165,9 @@ function ScriptAmortTable({ stats }) {
                 </td>
                 <td>{s.invested > 0 ? formatMoney(s.invested) : '—'}</td>
                 <td>{s.sessionCount}</td>
-                <td>{s.invested > 0 && s.sessionCount > 0 ? formatMoney(s.perSession) : '—'}</td>
+                <td>{s.ownCount}</td>
+                <td>{s.rentalCount || '—'}</td>
+                <td>{s.invested > 0 && s.ownCount > 0 ? formatMoney(s.perSession) : '—'}</td>
                 <td>{formatMoney(s.revenue)}</td>
                 <td>{formatMoney(s.wages + s.expenses)}</td>
                 <td className={s.netProfit >= 0 ? 'amort-positive' : 'amort-negative'}>
@@ -1199,7 +1201,10 @@ function ScriptAmortTable({ stats }) {
 
 function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
   const [open, setOpen] = useState(false);
-  const { script, cost, invested, sessionCount, perSession, grossProfit } = stat;
+  const {
+    script, cost, invested, sessionCount, ownCount, rentalCount, rentalIncome,
+    perSession, grossProfit,
+  } = stat;
   const recovered = invested > 0 && grossProfit >= invested;
 
   return (
@@ -1216,12 +1221,15 @@ function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
           </span>
         </div>
         <div className="script-card-stats">
-          <span className="script-stat"><em>{sessionCount}</em> 場</span>
+          <span className="script-stat">
+            <em>{sessionCount}</em> 場
+            {rentalCount > 0 && <span className="script-stat-split">（自家 {ownCount}・出租 {rentalCount}）</span>}
+          </span>
           <span className="script-stat">
             投入 <em>{invested > 0 ? formatMoney(invested) : '—'}</em>
           </span>
           <span className="script-stat">
-            單場攤提 <em>{invested > 0 && sessionCount > 0 ? formatMoney(perSession) : '—'}</em>
+            單場攤提 <em>{invested > 0 && ownCount > 0 ? formatMoney(perSession) : '—'}</em>
           </span>
           {invested > 0 && (
             <span className={recovered ? 'script-badge done' : 'script-badge'}>
@@ -1304,11 +1312,20 @@ function ScriptLibraryRow({ stat, onChangeField, onChangeCost, onRemove }) {
 
           <div className="script-amort-summary">
             <div>投入合計：<strong>{formatMoney(invested)}</strong></div>
-            <div>已開 <strong>{sessionCount}</strong> 場</div>
-            <div>單場攤提：<strong>{invested > 0 && sessionCount > 0 ? formatMoney(perSession) : '—'}</strong></div>
             <div>
-              累積毛利（收入 − 薪資 − 雜支）：<strong>{formatMoney(grossProfit)}</strong>
+              總場次 <strong>{sessionCount}</strong> 場
+              {rentalCount > 0 && `（自家 ${ownCount}・出租 ${rentalCount}）`}
             </div>
+            <div>單場攤提：<strong>{invested > 0 && ownCount > 0 ? formatMoney(perSession) : '—'}</strong></div>
+            <div>
+              累積毛利（自家場收入 − 薪資 − 雜支）：<strong>{formatMoney(grossProfit)}</strong>
+            </div>
+            {rentalCount > 0 && (
+              <div className="rental-note">
+                出租場 {rentalCount} 場、場地費 {formatMoney(rentalIncome)}，
+                已列入金額總覽的出租收入，不計入這本的回本。
+              </div>
+            )}
             <div className={stat.netProfit >= 0 ? 'amort-positive' : 'amort-negative'}>
               扣除投入後損益：<strong>{formatMoney(stat.netProfit)}</strong>
             </div>
@@ -2399,10 +2416,11 @@ export default function BoothBookingApp() {
   /* ---------- 劇本攤提統計（全部歷史，不限當月） ---------- */
 
   const scriptStats = useMemo(() => {
-    /* 先把每場次歸到它的劇本底下 */
+    /* 先把每場次歸到它的劇本底下。
+       出租場（含合作私團，例如阿齊私團的《戒斷反應》）也要收進來算場次數，
+       但不列入回本計算——那是對方的本、租金算場地收入，不該記在劇本頭上。 */
     const byScript = {};
     bookings.forEach((b) => {
-      if (b.category === 'rentOut') return; // 出租場是別人的本，不算我們的攤提
       const script = findScript(scripts, b.scriptId || b.activityName);
       if (!script) return;
       if (!byScript[script.id]) byScript[script.id] = [];
@@ -2410,24 +2428,35 @@ export default function BoothBookingApp() {
     });
 
     return scripts.map((script) => {
-      const sessions = byScript[script.id] || [];
+      const allSessions = byScript[script.id] || [];
+      /* 自家場＋外借場才是我們自己開的，攤提與回本只看這些 */
+      const ownSessions = allSessions.filter((b) => b.category !== 'rentOut');
+      const rentalSessions = allSessions.filter((b) => b.category === 'rentOut');
+
       const cost = { ...EMPTY_SCRIPT_COST, ...(scriptCosts[script.id] || {}) };
       const invested = (Number(cost.scriptCost) || 0)
         + (Number(cost.propCost) || 0)
         + (Number(cost.otherCost) || 0);
-      const sessionCount = sessions.length;
-      const revenue = sessions.reduce((sum, b) => sum + computeAmount(b), 0);
-      const wages = sessions.reduce((sum, b) => sum + computeWages(b), 0);
-      const expenses = sessions.reduce((sum, b) => sum + computeExpenses(b), 0);
-      /* 單場攤提＝一次性投入 ÷ 已開場次數；還沒開過就等於全額未攤提 */
-      const perSession = sessionCount > 0 ? invested / sessionCount : invested;
-      /* 毛利＝收入 −（薪資＋雜支），再扣掉一次性投入才是真正的損益 */
+
+      const sessionCount = allSessions.length;        // 總場次（你要看的被預約次數）
+      const ownCount = ownSessions.length;            // 自家場次
+      const rentalCount = rentalSessions.length;      // 出租場次
+      const rentalIncome = rentalSessions.reduce((sum, b) => sum + computeAmount(b), 0);
+
+      const revenue = ownSessions.reduce((sum, b) => sum + computeAmount(b), 0);
+      const wages = ownSessions.reduce((sum, b) => sum + computeWages(b), 0);
+      const expenses = ownSessions.reduce((sum, b) => sum + computeExpenses(b), 0);
+      /* 單場攤提＝一次性投入 ÷ 自家場次數；還沒自己開過就等於全額未攤提 */
+      const perSession = ownCount > 0 ? invested / ownCount : invested;
+      /* 毛利＝自家場收入 −（薪資＋雜支），再扣掉一次性投入才是真正的損益 */
       const grossProfit = revenue - wages - expenses;
       const netProfit = grossProfit - invested;
       const recoveryRate = invested > 0 ? Math.min(grossProfit / invested, 10) : null;
-      const lastDate = sessions.map((b) => b.date).sort().slice(-1)[0] || '';
+      const lastDate = allSessions.map((b) => b.date).sort().slice(-1)[0] || '';
       return {
-        script, cost, invested, sessionCount, revenue, wages, expenses,
+        script, cost, invested,
+        sessionCount, ownCount, rentalCount, rentalIncome,
+        revenue, wages, expenses,
         perSession, grossProfit, netProfit, recoveryRate, lastDate,
       };
     });
@@ -2605,14 +2634,16 @@ export default function BoothBookingApp() {
 
     rows.push([]);
     rows.push(['劇本攤提（全部歷史，不限本月）']);
-    rows.push(['劇本', '類型', '投入成本', '已開場次', '單場攤提', '累積收入', '累積薪資', '累積雜支', '扣除投入後損益']);
+    rows.push(['劇本', '類型', '投入成本', '總場次', '自家場', '出租場', '單場攤提', '自家場收入', '累積薪資', '累積雜支', '扣除投入後損益']);
     scriptStats
       .filter((s) => s.invested > 0 || s.sessionCount > 0)
       .sort((a, b) => b.invested - a.invested)
       .forEach((s) => {
         rows.push([
-          s.script.title, s.script.category, s.invested, s.sessionCount,
-          Math.round(s.perSession), s.revenue, s.wages, s.expenses, s.netProfit,
+          s.script.title, s.script.category, s.invested,
+          s.sessionCount, s.ownCount, s.rentalCount,
+          s.ownCount > 0 ? Math.round(s.perSession) : '',
+          s.revenue, s.wages, s.expenses, s.netProfit,
         ]);
       });
 
@@ -4455,6 +4486,8 @@ const baseStyles = `
 .script-card-stats { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
 .script-stat { font-size: 0.73rem; color: #A98C7A; white-space: nowrap; }
 .script-stat em { font-style: normal; font-weight: 700; color: #5B4032; }
+.script-stat-split { color: #BFA89A; font-size: 0.69rem; margin-left: 3px; }
+.rental-note { flex-basis: 100%; color: #A98C7A; font-size: 0.75rem; line-height: 1.5; }
 .script-badge {
   background: #FDEEF0; color: #C45D72; border-radius: 20px;
   padding: 2px 9px; font-size: 0.71rem; white-space: nowrap;
