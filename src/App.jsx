@@ -2542,7 +2542,7 @@ export default function BoothBookingApp() {
       const script = findScript(scripts, b.scriptId || b.activityName);
       if (!script) {
         /* 已經歸到「其他」三類之一的就不再提醒，否則數字永遠降不下來 */
-        if (!otherNameMap[(b.activityName || '').trim()]) unmatched += 1;
+        if (bucketOfBooking(b) === '') unmatched += 1;
         return;
       }
       if (b.category === 'rentOut') rental += 1;
@@ -2556,10 +2556,26 @@ export default function BoothBookingApp() {
      使用者確認後寫成該本的別名（aliases），之後同名場次就會自動歸戶；
      本來就不是劇本的（包場、主題聚會）可以標成「非劇本活動」收起來。 */
 
+  /* 一筆場次目前歸在哪裡。優先序：
+     劇本庫 → 該筆自己的指定（逐筆微調） → 名稱層級的分類 → 尚未分類。
+     回傳 null 代表已歸給某本劇本，'' 代表還沒分類。 */
+  function bucketOfBooking(b) {
+    if (findScript(scripts, b.scriptId || b.activityName)) return null;
+    if (b.otherBucket === 'pending') return '';
+    return b.otherBucket || otherNameMap[(b.activityName || '').trim()] || '';
+  }
+
+  function setBookingBucket(bookingId, bucket) {
+    persistBookings(bookings.map((b) => (
+      b.id === bookingId ? { ...b, otherBucket: bucket || 'pending' } : b
+    )));
+  }
+
   const unmatchedNames = useMemo(() => {
     const map = {};
     bookings.forEach((b) => {
-      if (findScript(scripts, b.scriptId || b.activityName)) return;
+      /* 已經歸給劇本、或已經分類過的都不再出現在待處理清單 */
+      if (bucketOfBooking(b) !== '') return;
       const name = (b.activityName || '').trim() || '（未填名稱）';
       if (!map[name]) {
         map[name] = { name, count: 0, own: 0, rental: 0, lastDate: '', years: new Set() };
@@ -2576,14 +2592,12 @@ export default function BoothBookingApp() {
       .map((entry) => ({
         ...entry,
         years: Array.from(entry.years).sort(),
-        bucket: otherNameMap[entry.name] || '',
-        suggestion: otherNameMap[entry.name] ? null : suggestScript(scripts, entry.name),
+        suggestion: suggestScript(scripts, entry.name),
       }))
-      .sort((a, b) => Number(!!a.bucket) - Number(!!b.bucket) || b.count - a.count
-        || a.name.localeCompare(b.name, 'zh-Hant'));
+      .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, 'zh-Hant'));
   }, [bookings, scripts, otherNameMap]);
 
-  const unmatchedActive = unmatchedNames.filter((n) => !n.bucket);
+  const unmatchedActive = unmatchedNames;
 
   /* 歸到「其他」的場次：單次借場、評估後沒上架的試跑場、包場活動等。
      這些不屬於任何一本，但仍是真實發生過的場次，所以照樣計數，
@@ -2593,12 +2607,23 @@ export default function BoothBookingApp() {
     const counts = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, 0]));
     bookings.filter(inYear).forEach((b) => {
       /* 劇本庫優先：之前歸到「其他」的名稱，只要那本後來上架了（或被設成別名），
-         就會在這裡被劇本接手，不再計入其他場次，避免同一場被數兩次。 */
-      if (findScript(scripts, b.scriptId || b.activityName)) return;
-      const bucket = otherNameMap[(b.activityName || '').trim()];
+         就會被劇本接手，不再計入其他場次，避免同一場被數兩次。 */
+      const bucket = bucketOfBooking(b);
       if (bucket && counts[bucket] !== undefined) counts[bucket] += 1;
     });
     return counts;
+  }, [bookings, scripts, otherNameMap, scriptYearFilter]);
+
+  /* 其他三類的單筆明細，給「出租統計」頁逐筆查閱與調整用 */
+  const otherDetail = useMemo(() => {
+    const inYear = (b) => scriptYearFilter === 'all' || (b.date || '').slice(0, 4) === scriptYearFilter;
+    const groups = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, []]));
+    bookings.filter(inYear).forEach((b) => {
+      const bucket = bucketOfBooking(b);
+      if (bucket && groups[bucket]) groups[bucket].push(b);
+    });
+    Object.values(groups).forEach((list) => list.sort((a, b) => (b.date || '').localeCompare(a.date || '')));
+    return groups;
   }, [bookings, scripts, otherNameMap, scriptYearFilter]);
 
   /* 已經被劇本庫接手、但分類表裡還留著的舊名稱（純粹是殘留，不影響數字） */
@@ -3912,7 +3937,7 @@ export default function BoothBookingApp() {
                 </summary>
                 <div className="unmatched-list">
                   {unmatchedNames.map((item) => (
-                    <div key={item.name} className={`unmatched-row ${item.bucket ? 'ignored' : ''}`}>
+                    <div key={item.name} className="unmatched-row">
                       <div className="unmatched-main">
                         <span className="unmatched-name">{item.name}</span>
                         <span className="unmatched-meta">
@@ -3923,22 +3948,7 @@ export default function BoothBookingApp() {
                         </span>
                       </div>
 
-                      {item.bucket ? (
-                        <div className="unmatched-actions">
-                          <select
-                            value={item.bucket}
-                            onChange={(e) => setOtherBucket(item.name, e.target.value)}
-                            aria-label="改變歸類"
-                          >
-                            {OTHER_BUCKETS.map((bucket) => (
-                              <option key={bucket.key} value={bucket.key}>{bucket.label}</option>
-                            ))}
-                          </select>
-                          <button type="button" className="btn-ghost small" onClick={() => setOtherBucket(item.name, '')}>
-                            復原
-                          </button>
-                        </div>
-                      ) : (
+
                         <div className="unmatched-actions">
                           {item.suggestion && (
                             <button
@@ -4062,6 +4072,45 @@ export default function BoothBookingApp() {
                 )}
               </div>
             )}
+
+            {OTHER_BUCKETS.map((bucket) => {
+              const list = otherDetail[bucket.key] || [];
+              if (list.length === 0) return null;
+              return (
+                <div key={bucket.key}>
+                  <div className="sub-heading">
+                    {bucket.label}
+                    <span className="heading-count">{list.length} 場</span>
+                  </div>
+                  <div className="other-detail-list">
+                    {list.map((b) => (
+                      <div key={b.id} className="other-detail-row">
+                        <div className="other-detail-main">
+                          <span className="other-detail-date">{formatDateShort(b.date)}</span>
+                          <span className="other-detail-name">{b.activityName || '（未填名稱）'}</span>
+                          <span className="other-detail-meta">
+                            {CATEGORY_META[b.category]?.label || ''}
+                            {roomOrVenueText(b) && `・${roomOrVenueText(b)}`}
+                            {b.personName && `・${b.personName}`}
+                            {computeAmount(b) > 0 && `・${formatMoney(computeAmount(b))}`}
+                          </span>
+                        </div>
+                        <select
+                          value={bucket.key}
+                          onChange={(e) => setBookingBucket(b.id, e.target.value)}
+                          aria-label="改變這一場的歸類"
+                        >
+                          {OTHER_BUCKETS.map((option) => (
+                            <option key={option.key} value={option.key}>{option.label}</option>
+                          ))}
+                          <option value="">退回待處理</option>
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </section>
         )}
 
@@ -5005,6 +5054,21 @@ const baseStyles = `
 }
 .partner-others summary::marker { color: #C9B0A2; }
 .partner-others-body { padding: 2px 13px 12px; }
+
+/* ---------- 其他場次單筆明細 ---------- */
+.other-detail-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 18px; }
+.other-detail-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  border: 1px solid #E9C9CE; border-radius: 10px; background: #FFFBF6; padding: 8px 12px;
+}
+.other-detail-main { flex: 1; min-width: 170px; }
+.other-detail-date { font-size: 0.74rem; color: #A98C7A; margin-right: 8px; }
+.other-detail-name { font-weight: 700; font-size: 0.83rem; color: #5B4032; }
+.other-detail-meta { display: block; font-size: 0.72rem; color: #A98C7A; margin-top: 2px; }
+.other-detail-row select {
+  background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 5px 8px; font-size: 0.77rem; color: #5B4032;
+}
 .partner-sub-row {
   display: flex; justify-content: space-between; align-items: center;
   padding: 5px 0; font-size: 0.8rem; color: #5B4032; border-top: 1px dashed #F0DCDF;
