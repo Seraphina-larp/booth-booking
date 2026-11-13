@@ -695,16 +695,20 @@ function SessionForm({ initialData, rooms, scripts, holidayCalendar, mode, onCan
       return {
         ...d,
         scriptId: script ? script.id : '',
-        /* 選「自訂」是明確的意思表示，之後統計就不要再用名稱去猜 */
-        scriptCustom: !script,
+        scriptCustom: false,
         activityName: script ? script.title : d.activityName,
       };
     });
   }
 
-  /* 在自訂欄位打字＝這個名稱不是從劇本庫選的 */
+  /* 打字只是改名稱，不預先認定是不是自訂。
+     名稱若對得到某一本，預設就照舊資料的規則算進那一本（別名也算），
+     要獨立計算再由提示列的按鈕明確指定。 */
   function setCustomName(value) {
-    setData((d) => ({ ...d, activityName: value, scriptId: '', scriptCustom: true }));
+    setData((d) => ({ ...d, activityName: value, scriptId: '' }));
+  }
+  function toggleCustom() {
+    setData((d) => ({ ...d, scriptCustom: !d.scriptCustom }));
   }
 
   const estimated = estimateAmount(data, scripts, holidayCalendar);
@@ -820,6 +824,7 @@ function SessionForm({ initialData, rooms, scripts, holidayCalendar, mode, onCan
             calendar={holidayCalendar}
             onPick={pickScript}
             onFreeText={setCustomName}
+            onToggleCustom={toggleCustom}
           />
 
           <div className="field">
@@ -1116,7 +1121,9 @@ function ExpensesEditor({ expenses, onChange }) {
 
 /* --------------------------------- 劇本選單（共用元件） --------------------------------- */
 
-function ScriptPicker({ scripts, scriptId, activityName, custom, date, calendar, onPick, onFreeText }) {
+function ScriptPicker({
+  scripts, scriptId, activityName, custom, date, calendar, onPick, onFreeText, onToggleCustom,
+}) {
   const activeScripts = scripts.filter((s) => s.active !== false);
   const grouped = SCRIPT_CATEGORIES
     .map((category) => ({ category, items: activeScripts.filter((s) => s.category === category) }))
@@ -1130,10 +1137,20 @@ function ScriptPicker({ scripts, scriptId, activityName, custom, date, calendar,
   const picked = scriptId ? findScript(scripts, scriptId) : null;
   const isCustom = !picked;
 
-  /* 自訂名稱剛好對得到某一本時要講出來，否則統計會算進那本而使用者不知情 */
-  const collision = isCustom && activityName ? findScript(scripts, activityName) : null;
+  /* 打完才判定。邊打邊比對的話，「那一束月光2」會在打到第 5 個字時
+     先被判成「那一束月光1」——那是別名沒錯，但使用者還沒打完。
+     停止輸入 700ms 或離開欄位才認定，中途不下結論。 */
+  const [settledName, setSettledName] = useState(activityName);
+  useEffect(() => {
+    /* 文字一改就先收起提示，免得停留在和當下文字不符的舊判定上 */
+    setSettledName('');
+    const timer = setTimeout(() => setSettledName(activityName), 700);
+    return () => clearTimeout(timer);
+  }, [activityName]);
+
+  const collision = isCustom && settledName ? findScript(scripts, settledName) : null;
   const viaAlias = collision
-    && (collision.aliases || []).some((a) => normalizeTitle(a) === normalizeTitle(activityName));
+    && (collision.aliases || []).some((a) => normalizeTitle(a) === normalizeTitle(settledName));
 
   return (
     <>
@@ -1169,16 +1186,20 @@ function ScriptPicker({ scripts, scriptId, activityName, custom, date, calendar,
       {isCustom && (
         <div className="field span2">
           <label>活動／劇本名稱（自訂）</label>
-          <input type="text" value={activityName} onChange={(e) => onFreeText(e.target.value)} />
+          <input
+            type="text"
+            value={activityName}
+            onChange={(e) => onFreeText(e.target.value)}
+            onBlur={() => setSettledName(activityName)}
+          />
           {collision && (
             <div className="custom-collision">
-              這個名稱{viaAlias ? '是' : '就是'}劇本庫《{collision.title}》
-              {viaAlias && '的別名'}。
+              這個名稱{viaAlias ? `是《${collision.title}》的別名` : `就是《${collision.title}》`}，
               {custom
-                ? '目前算成自訂，不會計入那一本。'
-                : '場次會計入那一本。'}
-              <button type="button" className="btn-ghost small" onClick={() => onPick(collision.id)}>
-                改成選《{collision.title}》
+                ? '目前獨立計算，不會算進那一本。'
+                : '場次會算進那一本。'}
+              <button type="button" className="btn-ghost small" onClick={onToggleCustom}>
+                {custom ? `改回算進《${collision.title}》` : '改成獨立計算'}
               </button>
             </div>
           )}
@@ -2306,13 +2327,16 @@ export default function BoothBookingApp() {
       return {
         ...f,
         scriptId: script ? script.id : '',
-        scriptCustom: !script,
+        scriptCustom: false,
         activityName: script ? script.title : f.activityName,
       };
     });
   }
   function setQuickCustomName(value) {
-    setQuickForm((f) => ({ ...f, activityName: value, scriptId: '', scriptCustom: true }));
+    setQuickForm((f) => ({ ...f, activityName: value, scriptId: '' }));
+  }
+  function toggleQuickCustom() {
+    setQuickForm((f) => ({ ...f, scriptCustom: !f.scriptCustom }));
   }
   function toggleQuickSlot(key) {
     setQuickForm((f) => {
@@ -4529,6 +4553,7 @@ export default function BoothBookingApp() {
                   calendar={holidayCalendar}
                   onPick={pickQuickScript}
                   onFreeText={setQuickCustomName}
+                  onToggleCustom={toggleQuickCustom}
                 />
 
                 <div className="field">
