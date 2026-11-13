@@ -2824,9 +2824,18 @@ export default function BoothBookingApp() {
         reclaimed.forEach((name) => { delete nextMap[name]; });
         persistOtherNameMap(nextMap);
       }
+      /* 官網沒讀到價格的本要講出來。合併時空值會保留既有資料（這是對的，
+         免得好不容易填的資料被洗掉），但如果不講，「沒讀到」和「沒變動」
+         在畫面上長得一模一樣，官網改了價格也只會看到「更新 0 本」。 */
+      const noPrice = incoming
+        .filter((item) => item.priceWeekday === '' || item.priceWeekday == null)
+        .map((item) => item.title);
+
       setScriptSyncResult({
         ok: true, source: payload.source, count: incoming.length,
-        fetchedAt: payload.fetchedAt, added, updated, missing, reclaimed,
+        fetchedAt: payload.fetchedAt, partial: payload.partial,
+        triedSources: payload.triedSources || [],
+        noPrice, added, updated, missing, reclaimed,
       });
     } catch (error) {
       setScriptSyncResult({ ok: false, message: error.message });
@@ -3843,6 +3852,14 @@ export default function BoothBookingApp() {
                       <ul className="sync-changes">
                         {scriptSyncResult.updated.map((line) => <li key={line}>{line}</li>)}
                       </ul>
+                    )}
+                    {(scriptSyncResult.noPrice || []).length > 0 && (
+                      <div className="sync-warn">
+                        有 {scriptSyncResult.noPrice.length} 本沒從官網讀到價格，這幾本的價格維持劇本庫原本的設定
+                        {scriptSyncResult.noPrice.length <= 8
+                          && `（${scriptSyncResult.noPrice.join('、')}）`}。
+                        {scriptSyncResult.partial && '官網版型可能改了，解析沒吃到價格欄位。'}
+                      </div>
                     )}
                     <div className="hint small">
                       新增 {scriptSyncResult.added.length} 本
@@ -5016,6 +5033,10 @@ const baseStyles = `
 .sync-row .hint { flex: 1; min-width: 220px; margin: 0; }
 .sync-banner { align-items: flex-start; }
 .sync-changes { margin: 6px 0 4px; padding-left: 18px; font-size: 0.78rem; color: #5B4032; line-height: 1.6; }
+.sync-warn {
+  margin: 6px 0 4px; padding: 7px 10px; border-radius: 8px;
+  background: #FDEEF0; color: #A2434F; font-size: 0.77rem; line-height: 1.6;
+}
 .sync-error { line-height: 1.5; }
 .script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
 .script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
