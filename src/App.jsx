@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import {
   EMPTY_SCRIPT_COST, SCRIPTS_SEED, SCRIPT_CATEGORIES,
-  findScript, isHolidayDate, suggestScript, unitPriceOf,
+  findScript, isHolidayDate, normalizeTitle, suggestScript, unitPriceOf,
 } from './scriptsData';
 import { auth } from './firebase';
 import {
@@ -177,9 +177,18 @@ function computeCost(b) {
   return computeWages(b) + computeExpenses(b);
 }
 
+/* 一筆場次對應到哪一本劇本。
+   scriptCustom 代表使用者明確用了自訂名稱，就算那個名稱剛好等於某本的書名
+   或別名也不該歸進去——否則「那一束月光2 還沒上架、先用自訂記」這種情況，
+   場次會被默默算進「那一束月光1」。 */
+function scriptOfBooking(scripts, booking) {
+  if (!booking || booking.scriptCustom) return null;
+  return findScript(scripts, booking.scriptId || booking.activityName);
+}
+
 /* 人數 × 該本定價，用來自動試算收費金額 */
 function estimateAmount(booking, scripts) {
-  const script = findScript(scripts, booking?.scriptId || booking?.activityName);
+  const script = scriptOfBooking(scripts, booking);
   const headcount = Number(booking?.headcount) || 0;
   if (!script || !headcount) return 0;
   return unitPriceOf(script, booking.date) * headcount;
@@ -685,9 +694,16 @@ function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
       return {
         ...d,
         scriptId: script ? script.id : '',
+        /* 選「自訂」是明確的意思表示，之後統計就不要再用名稱去猜 */
+        scriptCustom: !script,
         activityName: script ? script.title : d.activityName,
       };
     });
+  }
+
+  /* 在自訂欄位打字＝這個名稱不是從劇本庫選的 */
+  function setCustomName(value) {
+    setData((d) => ({ ...d, activityName: value, scriptId: '', scriptCustom: true }));
   }
 
   const estimated = estimateAmount(data, scripts);
@@ -796,11 +812,12 @@ function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
 
           <ScriptPicker
             scripts={scripts}
-            scriptId={data.scriptId || data.activityName}
+            scriptId={data.scriptId}
             activityName={data.activityName}
+            custom={data.scriptCustom}
             date={data.date}
             onPick={pickScript}
-            onFreeText={(value) => set('activityName', value)}
+            onFreeText={setCustomName}
           />
 
           <div className="field">
@@ -1097,15 +1114,24 @@ function ExpensesEditor({ expenses, onChange }) {
 
 /* --------------------------------- 劇本選單（共用元件） --------------------------------- */
 
-function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeText }) {
+function ScriptPicker({ scripts, scriptId, activityName, custom, date, onPick, onFreeText }) {
   const activeScripts = scripts.filter((s) => s.active !== false);
   const grouped = SCRIPT_CATEGORIES
     .map((category) => ({ category, items: activeScripts.filter((s) => s.category === category) }))
     .filter((g) => g.items.length > 0);
   const uncategorized = activeScripts.filter((s) => !SCRIPT_CATEGORIES.includes(s.category));
-  const picked = findScript(scripts, scriptId);
-  /* 選單沒選到、但有舊的手打名稱時，維持自由輸入模式，不要把舊資料蓋掉 */
+
+  /* 只看有沒有真的選到劇本，不從輸入的文字反推。
+     以前是拿打到一半的名稱去比對劇本庫，一旦撞到某本的書名或別名，
+     自訂輸入框就會當場消失；而且選回「自訂」時那個名稱又會再被比對到，
+     等於鎖死在那一本上出不來。 */
+  const picked = scriptId ? findScript(scripts, scriptId) : null;
   const isCustom = !picked;
+
+  /* 自訂名稱剛好對得到某一本時要講出來，否則統計會算進那本而使用者不知情 */
+  const collision = isCustom && activityName ? findScript(scripts, activityName) : null;
+  const viaAlias = collision
+    && (collision.aliases || []).some((a) => normalizeTitle(a) === normalizeTitle(activityName));
 
   return (
     <>
@@ -1142,6 +1168,18 @@ function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeTex
         <div className="field span2">
           <label>活動／劇本名稱（自訂）</label>
           <input type="text" value={activityName} onChange={(e) => onFreeText(e.target.value)} />
+          {collision && (
+            <div className="custom-collision">
+              這個名稱{viaAlias ? '是' : '就是'}劇本庫《{collision.title}》
+              {viaAlias && '的別名'}。
+              {custom
+                ? '目前算成自訂，不會計入那一本。'
+                : '場次會計入那一本。'}
+              <button type="button" className="btn-ghost small" onClick={() => onPick(collision.id)}>
+                改成選《{collision.title}》
+              </button>
+            </div>
+          )}
         </div>
       )}
     </>
@@ -1975,7 +2013,7 @@ export default function BoothBookingApp() {
     return {
       id: uid('bk'), category: 'own', date: presetDate || todayStr(),
       roomId: rooms[0]?.id || '', venueName: '', slots: ['早'], timeStart: '', timeEnd: '',
-      activityName: '', scriptId: '', headcount: '', personName: '', contact: '',
+      activityName: '', scriptId: '', scriptCustom: false, headcount: '', personName: '', contact: '',
       hosts: [{ id: uid('h'), name: '', role: '主持', wage: '', wagePaid: 'unpaid' }], hostNote: '',
       expenses: [],
       ownAmount: '', paymentStatus: 'unpaid', feeType: 'fixed', feeRate: '', feeHours: '',
@@ -1993,7 +2031,7 @@ export default function BoothBookingApp() {
     const timeStart = b.timeStart || b.time || '';
     const timeEnd = b.timeEnd || '';
     /* 舊場次沒有 scriptId，用活動名稱回頭對一次劇本庫，對得到就自動補上 */
-    const matched = findScript(scripts, b.scriptId || b.activityName);
+    const matched = scriptOfBooking(scripts, b);
     setModal({
       mode: 'edit',
       data: {
@@ -2003,7 +2041,8 @@ export default function BoothBookingApp() {
         slots: getSlotsList(b),
         timeStart,
         timeEnd,
-        scriptId: matched ? matched.id : (b.scriptId || ''),
+        scriptId: matched ? matched.id : '',
+        scriptCustom: !!b.scriptCustom,
         headcount: b.headcount ?? '',
         expenses: getExpenses(b),
       },
@@ -2018,7 +2057,7 @@ export default function BoothBookingApp() {
         id: uid('bk'), category: 'rentOut', date: request.preferredDate || todayStr(),
         roomId: room?.id || '', venueName: '', slots: [request.preferredSlot || '早'],
         timeStart: request.preferredTimeStart || '', timeEnd: request.preferredTimeEnd || '',
-        activityName: request.activityName || '', scriptId: '', headcount: '',
+        activityName: request.activityName || '', scriptId: '', scriptCustom: false, headcount: '',
         personName: request.partnerName || '',
         contact: request.contact || '', hosts: [], hostNote: '', expenses: [],
         ownAmount: '', paymentStatus: 'unpaid',
@@ -2152,9 +2191,13 @@ export default function BoothBookingApp() {
       return {
         ...f,
         scriptId: script ? script.id : '',
+        scriptCustom: !script,
         activityName: script ? script.title : f.activityName,
       };
     });
+  }
+  function setQuickCustomName(value) {
+    setQuickForm((f) => ({ ...f, activityName: value, scriptId: '', scriptCustom: true }));
   }
   function toggleQuickSlot(key) {
     setQuickForm((f) => {
@@ -2495,7 +2538,7 @@ export default function BoothBookingApp() {
        但不列入回本計算——那是對方的本、租金算場地收入，不該記在劇本頭上。 */
     const byScript = {};
     bookings.forEach((b) => {
-      const script = findScript(scripts, b.scriptId || b.activityName);
+      const script = scriptOfBooking(scripts, b);
       if (!script) return;
       if (!byScript[script.id]) byScript[script.id] = [];
       byScript[script.id].push(b);
@@ -2555,7 +2598,7 @@ export default function BoothBookingApp() {
     let rental = 0;
     let unmatched = 0;
     bookings.filter(inYear).forEach((b) => {
-      const script = findScript(scripts, b.scriptId || b.activityName);
+      const script = scriptOfBooking(scripts, b);
       if (!script) {
         /* 已經歸到「其他」三類之一的就不再提醒，否則數字永遠降不下來 */
         if (bucketOfBooking(b) === '') unmatched += 1;
@@ -2576,7 +2619,7 @@ export default function BoothBookingApp() {
      劇本庫 → 該筆自己的指定（逐筆微調） → 名稱層級的分類 → 尚未分類。
      回傳 null 代表已歸給某本劇本，'' 代表還沒分類。 */
   function bucketOfBooking(b) {
-    if (findScript(scripts, b.scriptId || b.activityName)) return null;
+    if (scriptOfBooking(scripts, b)) return null;
     if (b.otherBucket === 'pending') return '';
     return b.otherBucket || otherNameMap[(b.activityName || '').trim()] || '';
   }
@@ -4352,11 +4395,12 @@ export default function BoothBookingApp() {
 
                 <ScriptPicker
                   scripts={scripts}
-                  scriptId={quickForm.scriptId || quickForm.activityName}
+                  scriptId={quickForm.scriptId}
                   activityName={quickForm.activityName}
+                  custom={quickForm.scriptCustom}
                   date={quickForm.date}
                   onPick={pickQuickScript}
-                  onFreeText={(value) => setQuickForm((f) => ({ ...f, activityName: value }))}
+                  onFreeText={setQuickCustomName}
                 />
 
                 <div className="field">
@@ -5039,6 +5083,11 @@ const baseStyles = `
 }
 .sync-error { line-height: 1.5; }
 .script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
+.custom-collision {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; padding: 7px 10px; border-radius: 8px;
+  background: #FFF3EA; color: #8A6A55; font-size: 0.76rem; line-height: 1.6;
+}
 .script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .script-card { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; overflow: hidden; }
 .script-card.inactive { opacity: 0.6; }
