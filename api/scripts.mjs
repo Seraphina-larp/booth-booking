@@ -200,8 +200,17 @@ async function fetchViaHtml() {
 /* ------------------------------ Handler ------------------------------ */
 
 export default async function handler(req, res) {
-  /* 讓瀏覽器可以快取 10 分鐘，避免每次按同步都真的去打官網 */
-  res.setHeader('Cache-Control', 's-maxage=600, stale-while-revalidate=3600');
+  /* 手動按「從官網同步」時一定要拿到最新資料，所以帶 ?fresh=1 就完全不快取。
+     沒帶的時候才用短快取，避免頁面反覆載入時一直打官網。
+
+     註：原本不分情況都設 s-maxage=600, stale-while-revalidate=3600，
+     結果 CDN 會先回 10 分鐘內的舊快取、之後一小時內還會先回舊的再背景更新，
+     官網改了價格按同步也抓不到新的。 */
+  const fresh = new URL(req.url, 'http://localhost').searchParams.get('fresh') === '1';
+  res.setHeader(
+    'Cache-Control',
+    fresh ? 'no-store, max-age=0' : 's-maxage=600, stale-while-revalidate=3600',
+  );
 
   const errors = [];
   for (const attempt of [fetchViaRest, fetchViaHtml]) {

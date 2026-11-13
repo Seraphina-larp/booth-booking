@@ -70,6 +70,12 @@ const OTHER_BUCKETS = [
 ];
 const OTHER_BUCKET_LABEL = Object.fromEntries(OTHER_BUCKETS.map((b) => [b.key, b.label]));
 
+/* 從官網同步時會更新的欄位，順便用來產生「哪裡變了」的說明 */
+const SYNC_FIELDS = [
+  ['title', '名稱'], ['category', '類型'], ['players', '人數'], ['duration', '時長'],
+  ['priceWeekday', '平日價'], ['priceHoliday', '假日價'], ['partner', '合作私團'],
+];
+
 const DEFAULT_TEXTS = {
   overview_hint: '',
   request_hint: '填寫以下資訊送出，場地方確認後會幫您安排進場次表。',
@@ -1579,13 +1585,23 @@ export default function BoothBookingApp() {
   }
   /* 劇本庫是逐字輸入的，直接寫 Firestore 會變成每打一個字送一次請求。
      這裡延遲 700ms 再寫，期間又有輸入就重新計時。 */
-  function persistScripts(next) {
+  /* immediate=true 用於按鈕觸發的整批變更（例如從官網同步）：
+     debounce 是為了逐字輸入才存在的，按鈕按完如果使用者馬上離開或重整，
+     700ms 內卸載會把 timer 清掉，那次儲存就無聲無息地不見了。 */
+  function persistScripts(next, { immediate = false } = {}) {
     setScripts(next);
-    if (!adminUnlocked) return;
+    if (!adminUnlocked) return Promise.resolve();
     clearTimeout(scriptSaveTimer.current);
+    if (immediate) {
+      return saveScriptCatalog(next).catch((error) => {
+        console.error('劇本庫儲存失敗', error);
+        throw error;
+      });
+    }
     scriptSaveTimer.current = setTimeout(() => {
       saveScriptCatalog(next).catch((error) => console.error('劇本庫儲存失敗', error));
     }, 700);
+    return Promise.resolve();
   }
   function persistOtherNameMap(next) {
     setOtherNameMap(next);
@@ -2729,7 +2745,9 @@ export default function BoothBookingApp() {
     setScriptSyncing(true);
     setScriptSyncResult(null);
     try {
-      const response = await fetch('/api/scripts');
+      /* fresh=1 讓伺服器回 no-store，t= 再擋掉瀏覽器自己的快取。
+         這是使用者主動按的按鈕，一定要拿到官網當下的資料。 */
+      const response = await fetch(`/api/scripts?fresh=1&t=${Date.now()}`, { cache: 'no-store' });
       const payload = await response.json();
       if (!response.ok || !payload.ok) {
         throw new Error(payload.detail || payload.error || `伺服器回應 ${response.status}`);
@@ -2771,8 +2789,19 @@ export default function BoothBookingApp() {
           partner: keepIfBlank(item.partner, current.partner),
           ...(item.url ? { url: item.url } : {}),
         };
-        if (JSON.stringify(next) !== JSON.stringify(current)) {
-          updated.push(next.title);
+        /* 逐欄比對並記下變化，這樣同步後看得出「告別詩 平日價 800→850」。
+           用 String 比較是因為在劇本庫手打的價格會存成字串，
+           數字 800 與字串 "800" 其實沒變，不該報成有更新。 */
+        const changes = [];
+        SYNC_FIELDS.forEach(([key, label]) => {
+          const before = current[key];
+          const after = next[key];
+          if (String(before ?? '') !== String(after ?? '')) {
+            changes.push(`${label} ${before === '' || before == null ? '—' : before}→${after}`);
+          }
+        });
+        if (changes.length > 0) {
+          updated.push(`${next.title}（${changes.join('、')}）`);
         }
         merged[index] = next;
       });
@@ -2785,7 +2814,8 @@ export default function BoothBookingApp() {
         .map((s) => s.title);
 
       merged = merged.sort((a, b) => (a.title || '').localeCompare(b.title || '', 'zh-Hant'));
-      persistScripts(merged);
+      /* 立即寫入，不走 debounce：同步完馬上離開頁面也不會掉資料 */
+      await persistScripts(merged, { immediate: true });
 
       /* 官網新上架的本，如果名稱先前被歸到「其他」，同步後就該交還給劇本庫 */
       const reclaimed = Object.keys(otherNameMap).filter((name) => findScript(merged, name));
@@ -2796,7 +2826,7 @@ export default function BoothBookingApp() {
       }
       setScriptSyncResult({
         ok: true, source: payload.source, count: incoming.length,
-        added, updated, missing, reclaimed,
+        fetchedAt: payload.fetchedAt, added, updated, missing, reclaimed,
       });
     } catch (error) {
       setScriptSyncResult({ ok: false, message: error.message });
@@ -3804,11 +3834,22 @@ export default function BoothBookingApp() {
                 <div className="success-banner sync-banner">
                   <Check size={18} />
                   <div>
-                    <div>官網目前有 {scriptSyncResult.count} 本。</div>
+                    <div>
+                      官網目前有 {scriptSyncResult.count} 本
+                      {scriptSyncResult.fetchedAt
+                        && `（讀取時間 ${new Date(scriptSyncResult.fetchedAt).toLocaleString('zh-TW', { hour12: false })}）`}
+                    </div>
+                    {scriptSyncResult.updated.length > 0 && (
+                      <ul className="sync-changes">
+                        {scriptSyncResult.updated.map((line) => <li key={line}>{line}</li>)}
+                      </ul>
+                    )}
                     <div className="hint small">
                       新增 {scriptSyncResult.added.length} 本
                       {scriptSyncResult.added.length > 0 && `（${scriptSyncResult.added.join('、')}）`}
                       ・更新 {scriptSyncResult.updated.length} 本
+                      {scriptSyncResult.updated.length === 0 && scriptSyncResult.added.length === 0
+                        && '：官網資料和劇本庫一致，沒有要改的'}
                       {scriptSyncResult.missing.length > 0
                         && `・官網上沒有但已保留 ${scriptSyncResult.missing.length} 本（${scriptSyncResult.missing.join('、')}）`}
                       {(scriptSyncResult.reclaimed || []).length > 0
@@ -4974,6 +5015,7 @@ const baseStyles = `
 .sync-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 .sync-row .hint { flex: 1; min-width: 220px; margin: 0; }
 .sync-banner { align-items: flex-start; }
+.sync-changes { margin: 6px 0 4px; padding-left: 18px; font-size: 0.78rem; color: #5B4032; line-height: 1.6; }
 .sync-error { line-height: 1.5; }
 .script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
 .script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
