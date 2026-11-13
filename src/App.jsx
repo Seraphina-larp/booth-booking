@@ -7,7 +7,8 @@ import {
 } from 'lucide-react';
 import {
   EMPTY_SCRIPT_COST, SCRIPTS_SEED, SCRIPT_CATEGORIES,
-  findScript, isHolidayDate, suggestScript, unitPriceOf,
+  EMPTY_HOLIDAY_CALENDAR, findScript, holidayReason, isHolidayDate, normalizeTitle,
+  suggestScript, unitPriceOf,
 } from './scriptsData';
 import { auth } from './firebase';
 import {
@@ -177,12 +178,21 @@ function computeCost(b) {
   return computeWages(b) + computeExpenses(b);
 }
 
+/* 一筆場次對應到哪一本劇本。
+   scriptCustom 代表使用者明確用了自訂名稱，就算那個名稱剛好等於某本的書名
+   或別名也不該歸進去——否則「那一束月光2 還沒上架、先用自訂記」這種情況，
+   場次會被默默算進「那一束月光1」。 */
+function scriptOfBooking(scripts, booking) {
+  if (!booking || booking.scriptCustom) return null;
+  return findScript(scripts, booking.scriptId || booking.activityName);
+}
+
 /* 人數 × 該本定價，用來自動試算收費金額 */
-function estimateAmount(booking, scripts) {
-  const script = findScript(scripts, booking?.scriptId || booking?.activityName);
+function estimateAmount(booking, scripts, calendar) {
+  const script = scriptOfBooking(scripts, booking);
   const headcount = Number(booking?.headcount) || 0;
   if (!script || !headcount) return 0;
-  return unitPriceOf(script, booking.date) * headcount;
+  return unitPriceOf(script, booking.date, calendar) * headcount;
 }
 
 function formatMoney(n) {
@@ -671,7 +681,7 @@ function HostsEditor({ hosts, onChange }) {
   );
 }
 
-function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
+function SessionForm({ initialData, rooms, scripts, holidayCalendar, mode, onCancel, onSave }) {
   const [data, setData] = useState(initialData);
   const [error, setError] = useState('');
 
@@ -685,12 +695,23 @@ function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
       return {
         ...d,
         scriptId: script ? script.id : '',
+        scriptCustom: false,
         activityName: script ? script.title : d.activityName,
       };
     });
   }
 
-  const estimated = estimateAmount(data, scripts);
+  /* 打字只是改名稱，不預先認定是不是自訂。
+     名稱若對得到某一本，預設就照舊資料的規則算進那一本（別名也算），
+     要獨立計算再由提示列的按鈕明確指定。 */
+  function setCustomName(value) {
+    setData((d) => ({ ...d, activityName: value, scriptId: '' }));
+  }
+  function toggleCustom() {
+    setData((d) => ({ ...d, scriptCustom: !d.scriptCustom }));
+  }
+
+  const estimated = estimateAmount(data, scripts, holidayCalendar);
   const entered = Number(data.ownAmount) || 0;
   const hasGap = estimated > 0 && entered > 0 && entered !== estimated;
   function toggleSlot(key) {
@@ -796,11 +817,14 @@ function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
 
           <ScriptPicker
             scripts={scripts}
-            scriptId={data.scriptId || data.activityName}
+            scriptId={data.scriptId}
             activityName={data.activityName}
+            custom={data.scriptCustom}
             date={data.date}
+            calendar={holidayCalendar}
             onPick={pickScript}
-            onFreeText={(value) => set('activityName', value)}
+            onFreeText={setCustomName}
+            onToggleCustom={toggleCustom}
           />
 
           <div className="field">
@@ -852,7 +876,7 @@ function SessionForm({ initialData, rooms, scripts, mode, onCancel, onSave }) {
                 <div className="field span2 estimate-line">
                   <span>
                     自動試算：{data.headcount} 人 × {formatMoney(estimated / (Number(data.headcount) || 1))}
-                    （{isHolidayDate(data.date) ? '假日價' : '平日價'}）＝ <strong>{formatMoney(estimated)}</strong>
+                    （{isHolidayDate(data.date, holidayCalendar) ? '假日價' : '平日價'}・{holidayReason(data.date, holidayCalendar)}）＝ <strong>{formatMoney(estimated)}</strong>
                   </span>
                   <button type="button" className="btn-ghost small" onClick={() => set('ownAmount', String(estimated))}>
                     <Calculator size={12} /> 帶入實收
@@ -1097,15 +1121,36 @@ function ExpensesEditor({ expenses, onChange }) {
 
 /* --------------------------------- 劇本選單（共用元件） --------------------------------- */
 
-function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeText }) {
+function ScriptPicker({
+  scripts, scriptId, activityName, custom, date, calendar, onPick, onFreeText, onToggleCustom,
+}) {
   const activeScripts = scripts.filter((s) => s.active !== false);
   const grouped = SCRIPT_CATEGORIES
     .map((category) => ({ category, items: activeScripts.filter((s) => s.category === category) }))
     .filter((g) => g.items.length > 0);
   const uncategorized = activeScripts.filter((s) => !SCRIPT_CATEGORIES.includes(s.category));
-  const picked = findScript(scripts, scriptId);
-  /* 選單沒選到、但有舊的手打名稱時，維持自由輸入模式，不要把舊資料蓋掉 */
+
+  /* 只看有沒有真的選到劇本，不從輸入的文字反推。
+     以前是拿打到一半的名稱去比對劇本庫，一旦撞到某本的書名或別名，
+     自訂輸入框就會當場消失；而且選回「自訂」時那個名稱又會再被比對到，
+     等於鎖死在那一本上出不來。 */
+  const picked = scriptId ? findScript(scripts, scriptId) : null;
   const isCustom = !picked;
+
+  /* 打完才判定。邊打邊比對的話，「那一束月光2」會在打到第 5 個字時
+     先被判成「那一束月光1」——那是別名沒錯，但使用者還沒打完。
+     停止輸入 700ms 或離開欄位才認定，中途不下結論。 */
+  const [settledName, setSettledName] = useState(activityName);
+  useEffect(() => {
+    /* 文字一改就先收起提示，免得停留在和當下文字不符的舊判定上 */
+    setSettledName('');
+    const timer = setTimeout(() => setSettledName(activityName), 700);
+    return () => clearTimeout(timer);
+  }, [activityName]);
+
+  const collision = isCustom && settledName ? findScript(scripts, settledName) : null;
+  const viaAlias = collision
+    && (collision.aliases || []).some((a) => normalizeTitle(a) === normalizeTitle(settledName));
 
   return (
     <>
@@ -1131,8 +1176,8 @@ function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeTex
         {picked && (
           <div className="script-meta-line">
             {picked.category}・{picked.players}・{picked.duration}
-            {unitPriceOf(picked, date) > 0 && (
-              <>　單價 {formatMoney(unitPriceOf(picked, date))}／人（{isHolidayDate(date) ? '假日' : '平日'}）</>
+            {unitPriceOf(picked, date, calendar) > 0 && (
+              <>　單價 {formatMoney(unitPriceOf(picked, date, calendar))}／人（{isHolidayDate(date, calendar) ? '假日' : '平日'}・{holidayReason(date, calendar)}）</>
             )}
           </div>
         )}
@@ -1141,10 +1186,130 @@ function ScriptPicker({ scripts, scriptId, activityName, date, onPick, onFreeTex
       {isCustom && (
         <div className="field span2">
           <label>活動／劇本名稱（自訂）</label>
-          <input type="text" value={activityName} onChange={(e) => onFreeText(e.target.value)} />
+          <input
+            type="text"
+            value={activityName}
+            onChange={(e) => onFreeText(e.target.value)}
+            onBlur={() => setSettledName(activityName)}
+          />
+          {collision && (
+            <div className="custom-collision">
+              這個名稱{viaAlias ? `是《${collision.title}》的別名` : `就是《${collision.title}》`}，
+              {custom
+                ? '目前獨立計算，不會算進那一本。'
+                : '場次會算進那一本。'}
+              <button type="button" className="btn-ghost small" onClick={onToggleCustom}>
+                {custom ? `改回算進《${collision.title}》` : '改成獨立計算'}
+              </button>
+            </div>
+          )}
         </div>
       )}
     </>
+  );
+}
+
+/* --------------------------------- 假日定價設定 --------------------------------- */
+
+function HolidaySettings({ calendar, onChange }) {
+  const [draftDate, setDraftDate] = useState('');
+  const cal = { ...EMPTY_HOLIDAY_CALENDAR, ...(calendar || {}) };
+
+  const addDate = (field) => {
+    if (!draftDate) return;
+    /* 一個日期只能屬於一邊，加到假日就要從補班日移掉，反之亦然 */
+    const other = field === 'holidays' ? 'workdays' : 'holidays';
+    onChange({
+      ...cal,
+      [field]: Array.from(new Set([...cal[field], draftDate])).sort(),
+      [other]: cal[other].filter((d) => d !== draftDate),
+    });
+    setDraftDate('');
+  };
+  const removeFrom = (field, value) => onChange({ ...cal, [field]: cal[field].filter((v) => v !== value) });
+  const toggleRecurring = (mmdd) => onChange({
+    ...cal,
+    recurring: cal.recurring.includes(mmdd)
+      ? cal.recurring.filter((v) => v !== mmdd)
+      : [...cal.recurring, mmdd].sort(),
+  });
+  const [draftRecurring, setDraftRecurring] = useState('');
+  const addRecurring = () => {
+    if (!/^\d{2}-\d{2}$/.test(draftRecurring)) return;
+    onChange({ ...cal, recurring: Array.from(new Set([...cal.recurring, draftRecurring])).sort() });
+    setDraftRecurring('');
+  };
+
+  return (
+    <div className="holiday-settings">
+      <p className="hint small">
+        預設只有週六日算假日價。1/1 這類國定假日落在平日時會被算成平日價，要在這裡補上。
+      </p>
+
+      <div className="sub-heading small">每年固定的國定假日</div>
+      <div className="alias-row">
+        {cal.recurring.map((mmdd) => (
+          <span key={mmdd} className="alias-chip">
+            {mmdd.replace('-', '/')}
+            <button type="button" onClick={() => toggleRecurring(mmdd)} aria-label={`移除 ${mmdd}`}>
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="holiday-add">
+        <input
+          type="text"
+          placeholder="MM-DD，例如 05-01"
+          value={draftRecurring}
+          onChange={(e) => setDraftRecurring(e.target.value)}
+        />
+        <button type="button" className="btn-ghost small" onClick={addRecurring}>新增每年固定假日</button>
+      </div>
+
+      <div className="sub-heading small">指定日期</div>
+      <div className="holiday-add">
+        <input type="date" value={draftDate} onChange={(e) => setDraftDate(e.target.value)} />
+        <button type="button" className="btn-ghost small" onClick={() => addDate('holidays')}>標為假日</button>
+        <button type="button" className="btn-ghost small" onClick={() => addDate('workdays')}>標為平日</button>
+      </div>
+      <p className="hint small">
+        農曆年、清明、端午、中秋每年日期都不一樣，用「標為假日」逐年補；
+        補班日用「標為平日」，優先於上面所有規則。
+      </p>
+
+      {cal.holidays.length > 0 && (
+        <>
+          <div className="holiday-label">指定假日</div>
+          <div className="alias-row">
+            {cal.holidays.map((d) => (
+              <span key={d} className="alias-chip">
+                {d}
+                <button type="button" onClick={() => removeFrom('holidays', d)} aria-label={`移除 ${d}`}>
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {cal.workdays.length > 0 && (
+        <>
+          <div className="holiday-label">補班日（算平日價）</div>
+          <div className="alias-row">
+            {cal.workdays.map((d) => (
+              <span key={d} className="alias-chip">
+                {d}
+                <button type="button" onClick={() => removeFrom('workdays', d)} aria-label={`移除 ${d}`}>
+                  <X size={11} />
+                </button>
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1445,6 +1610,7 @@ export default function BoothBookingApp() {
   const [pageTexts, setPageTexts] = useState({});
   const [scripts, setScripts] = useState(SCRIPTS_SEED);
   const [scriptCosts, setScriptCosts] = useState({});
+  const [holidayCalendar, setHolidayCalendar] = useState(EMPTY_HOLIDAY_CALENDAR);
   /* { 活動名稱: 'otherOwn' | 'otherRental' | 'nonScript' } */
   const [otherNameMap, setOtherNameMap] = useState({});
   const [scriptYearFilter, setScriptYearFilter] = useState('all');
@@ -1607,6 +1773,12 @@ export default function BoothBookingApp() {
     setOtherNameMap(next);
     if (adminUnlocked) {
       savePrivateConfig({ otherNameMap: next }).catch((error) => console.error('其他場次分類儲存失敗', error));
+    }
+  }
+  function persistHolidayCalendar(next) {
+    setHolidayCalendar(next);
+    if (adminUnlocked) {
+      savePrivateConfig({ holidayCalendar: next }).catch((error) => console.error('假日設定儲存失敗', error));
     }
   }
   function persistScriptCosts(next) {
@@ -1811,6 +1983,7 @@ export default function BoothBookingApp() {
           setReminderLog(data.reminderLog || {});
           setSyncConfig(data.syncConfig || {});
           setScriptCosts(data.scriptCosts || {});
+          setHolidayCalendar(data.holidayCalendar || EMPTY_HOLIDAY_CALENDAR);
           setOtherNameMap(data.otherNameMap || {});
         } else {
           if (!user.emailVerified) {
@@ -1913,6 +2086,7 @@ export default function BoothBookingApp() {
       setReminderLog(data.reminderLog || {});
       setSyncConfig(data.syncConfig || {});
       setScriptCosts(data.scriptCosts || {});
+      setHolidayCalendar(data.holidayCalendar || EMPTY_HOLIDAY_CALENDAR);
       setOtherNameMap(data.otherNameMap || {});
       setMigrationState('done');
       window.alert('舊資料已安全轉移。接著請在人員帳號頁綁定每位夥伴的 UID。');
@@ -1975,7 +2149,7 @@ export default function BoothBookingApp() {
     return {
       id: uid('bk'), category: 'own', date: presetDate || todayStr(),
       roomId: rooms[0]?.id || '', venueName: '', slots: ['早'], timeStart: '', timeEnd: '',
-      activityName: '', scriptId: '', headcount: '', personName: '', contact: '',
+      activityName: '', scriptId: '', scriptCustom: false, headcount: '', personName: '', contact: '',
       hosts: [{ id: uid('h'), name: '', role: '主持', wage: '', wagePaid: 'unpaid' }], hostNote: '',
       expenses: [],
       ownAmount: '', paymentStatus: 'unpaid', feeType: 'fixed', feeRate: '', feeHours: '',
@@ -1993,7 +2167,7 @@ export default function BoothBookingApp() {
     const timeStart = b.timeStart || b.time || '';
     const timeEnd = b.timeEnd || '';
     /* 舊場次沒有 scriptId，用活動名稱回頭對一次劇本庫，對得到就自動補上 */
-    const matched = findScript(scripts, b.scriptId || b.activityName);
+    const matched = scriptOfBooking(scripts, b);
     setModal({
       mode: 'edit',
       data: {
@@ -2003,7 +2177,8 @@ export default function BoothBookingApp() {
         slots: getSlotsList(b),
         timeStart,
         timeEnd,
-        scriptId: matched ? matched.id : (b.scriptId || ''),
+        scriptId: matched ? matched.id : '',
+        scriptCustom: !!b.scriptCustom,
         headcount: b.headcount ?? '',
         expenses: getExpenses(b),
       },
@@ -2018,7 +2193,7 @@ export default function BoothBookingApp() {
         id: uid('bk'), category: 'rentOut', date: request.preferredDate || todayStr(),
         roomId: room?.id || '', venueName: '', slots: [request.preferredSlot || '早'],
         timeStart: request.preferredTimeStart || '', timeEnd: request.preferredTimeEnd || '',
-        activityName: request.activityName || '', scriptId: '', headcount: '',
+        activityName: request.activityName || '', scriptId: '', scriptCustom: false, headcount: '',
         personName: request.partnerName || '',
         contact: request.contact || '', hosts: [], hostNote: '', expenses: [],
         ownAmount: '', paymentStatus: 'unpaid',
@@ -2152,9 +2327,16 @@ export default function BoothBookingApp() {
       return {
         ...f,
         scriptId: script ? script.id : '',
+        scriptCustom: false,
         activityName: script ? script.title : f.activityName,
       };
     });
+  }
+  function setQuickCustomName(value) {
+    setQuickForm((f) => ({ ...f, activityName: value, scriptId: '' }));
+  }
+  function toggleQuickCustom() {
+    setQuickForm((f) => ({ ...f, scriptCustom: !f.scriptCustom }));
   }
   function toggleQuickSlot(key) {
     setQuickForm((f) => {
@@ -2264,7 +2446,7 @@ export default function BoothBookingApp() {
   }, [bookings]);
 
   const selectedDayItems = bookingsByDate[selectedDate] || [];
-  const quickEstimate = estimateAmount(quickForm, scripts);
+  const quickEstimate = estimateAmount(quickForm, scripts, holidayCalendar);
 
   /* 有場次的年份 + 今年，給年份下拉選單用 */
   const availableYears = useMemo(() => {
@@ -2495,7 +2677,7 @@ export default function BoothBookingApp() {
        但不列入回本計算——那是對方的本、租金算場地收入，不該記在劇本頭上。 */
     const byScript = {};
     bookings.forEach((b) => {
-      const script = findScript(scripts, b.scriptId || b.activityName);
+      const script = scriptOfBooking(scripts, b);
       if (!script) return;
       if (!byScript[script.id]) byScript[script.id] = [];
       byScript[script.id].push(b);
@@ -2555,7 +2737,7 @@ export default function BoothBookingApp() {
     let rental = 0;
     let unmatched = 0;
     bookings.filter(inYear).forEach((b) => {
-      const script = findScript(scripts, b.scriptId || b.activityName);
+      const script = scriptOfBooking(scripts, b);
       if (!script) {
         /* 已經歸到「其他」三類之一的就不再提醒，否則數字永遠降不下來 */
         if (bucketOfBooking(b) === '') unmatched += 1;
@@ -2576,7 +2758,7 @@ export default function BoothBookingApp() {
      劇本庫 → 該筆自己的指定（逐筆微調） → 名稱層級的分類 → 尚未分類。
      回傳 null 代表已歸給某本劇本，'' 代表還沒分類。 */
   function bucketOfBooking(b) {
-    if (findScript(scripts, b.scriptId || b.activityName)) return null;
+    if (scriptOfBooking(scripts, b)) return null;
     if (b.otherBucket === 'pending') return '';
     return b.otherBucket || otherNameMap[(b.activityName || '').trim()] || '';
   }
@@ -3967,6 +4149,18 @@ export default function BoothBookingApp() {
               <Plus size={15} /> 新增一本劇本
             </button>
 
+            <details className="holiday-fold">
+              <summary>
+                假日定價設定
+                <span className="heading-count">
+                  國定假日 {(holidayCalendar.recurring || []).length}
+                  ・指定假日 {(holidayCalendar.holidays || []).length}
+                  ・補班日 {(holidayCalendar.workdays || []).length}
+                </span>
+              </summary>
+              <HolidaySettings calendar={holidayCalendar} onChange={persistHolidayCalendar} />
+            </details>
+
             {staleOtherNames.length > 0 && (
               <div className="reclaim-row">
                 <span>
@@ -4352,11 +4546,14 @@ export default function BoothBookingApp() {
 
                 <ScriptPicker
                   scripts={scripts}
-                  scriptId={quickForm.scriptId || quickForm.activityName}
+                  scriptId={quickForm.scriptId}
                   activityName={quickForm.activityName}
+                  custom={quickForm.scriptCustom}
                   date={quickForm.date}
+                  calendar={holidayCalendar}
                   onPick={pickQuickScript}
-                  onFreeText={(value) => setQuickForm((f) => ({ ...f, activityName: value }))}
+                  onFreeText={setQuickCustomName}
+                  onToggleCustom={toggleQuickCustom}
                 />
 
                 <div className="field">
@@ -4392,7 +4589,7 @@ export default function BoothBookingApp() {
                     </div>
                     {quickEstimate > 0 && (
                       <div className="field span2 estimate-line">
-                        <span>自動試算：<strong>{formatMoney(quickEstimate)}</strong>（{isHolidayDate(quickForm.date) ? '假日價' : '平日價'}）</span>
+                        <span>自動試算：<strong>{formatMoney(quickEstimate)}</strong>（{isHolidayDate(quickForm.date, holidayCalendar) ? '假日價' : '平日價'}・{holidayReason(quickForm.date, holidayCalendar)}）</span>
                         <button
                           type="button"
                           className="btn-ghost small"
@@ -4554,6 +4751,7 @@ export default function BoothBookingApp() {
           initialData={modal.data}
           rooms={rooms}
           scripts={scripts}
+          holidayCalendar={holidayCalendar}
           mode={modal.mode}
           onCancel={closeModal}
           onSave={handleSaveModal}
@@ -5039,6 +5237,11 @@ const baseStyles = `
 }
 .sync-error { line-height: 1.5; }
 .script-meta-line { font-size: 0.76rem; color: #A98C7A; margin-top: 5px; }
+.custom-collision {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; padding: 7px 10px; border-radius: 8px;
+  background: #FFF3EA; color: #8A6A55; font-size: 0.76rem; line-height: 1.6;
+}
 .script-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
 .script-card { border: 1px solid #E9C9CE; border-radius: 12px; background: #FFFBF6; overflow: hidden; }
 .script-card.inactive { opacity: 0.6; }
@@ -5071,6 +5274,20 @@ const baseStyles = `
   font-size: 0.8rem; color: #4A6B55; margin-top: 16px;
 }
 .reclaim-row span { flex: 1; min-width: 200px; line-height: 1.5; }
+.holiday-fold { margin-top: 22px; border-top: 1px dashed #E9C9CE; padding-top: 14px; }
+.holiday-fold > summary {
+  cursor: pointer; font-family: 'Noto Serif TC', serif; font-size: 0.86rem;
+  color: #A98C7A; padding: 4px 0;
+}
+.holiday-fold > summary::marker { color: #C9B0A2; }
+.holiday-settings { padding: 4px 0 8px; }
+.holiday-settings .hint { margin: 4px 0 8px; }
+.holiday-add { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0 4px; }
+.holiday-add input {
+  background: #fff; border: 1px solid #E9C9CE; border-radius: 8px;
+  padding: 6px 9px; font-size: 0.8rem; color: #5B4032;
+}
+.holiday-label { font-size: 0.76rem; color: #A98C7A; margin: 10px 0 4px; }
 .unmatched-fold { margin-top: 22px; border-top: 1px dashed #E9C9CE; padding-top: 14px; }
 .unmatched-fold > summary {
   cursor: pointer; font-family: 'Noto Serif TC', serif; font-size: 0.86rem;

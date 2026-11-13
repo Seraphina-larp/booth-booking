@@ -159,19 +159,59 @@ export function suggestScript(scripts, name) {
 }
 
 /* 判斷日期是否為假日（六、日）；用來決定要套平日價還是假日價 */
-export function isHolidayDate(dateStr) {
+/* 每年日期固定的國定假日（MM-DD）。
+   農曆年、清明、端午、中秋每年日期都不同，沒辦法寫死，
+   要在後台「假日定價設定」逐年補上。 */
+export const RECURRING_HOLIDAYS_DEFAULT = [
+  '01-01', // 中華民國開國紀念日
+  '02-28', // 和平紀念日
+  '04-04', // 兒童節
+  '10-10', // 國慶日
+];
+
+export const EMPTY_HOLIDAY_CALENDAR = {
+  recurring: RECURRING_HOLIDAYS_DEFAULT,
+  holidays: [], // 額外的假日，YYYY-MM-DD（農曆年、中秋這類）
+  workdays: [], // 強制算平日，YYYY-MM-DD（補班日）
+};
+
+/* 判斷要不要套假日價。優先序：
+   補班日 → 指定假日 → 每年固定的國定假日 → 週六日。
+   只看週六日的話，1/1 落在平日就會算成平日價。 */
+export function isHolidayDate(dateStr, calendar = EMPTY_HOLIDAY_CALENDAR) {
   if (!dateStr) return false;
-  const parts = String(dateStr).split('-').map(Number);
+  const date = String(dateStr);
+  const parts = date.split('-').map(Number);
   if (parts.length < 3 || !parts[0]) return false;
+
+  const cal = { ...EMPTY_HOLIDAY_CALENDAR, ...(calendar || {}) };
+  if ((cal.workdays || []).includes(date)) return false;
+  if ((cal.holidays || []).includes(date)) return true;
+  if ((cal.recurring || []).includes(date.slice(5))) return true;
+
   const day = new Date(parts[0], parts[1] - 1, parts[2]).getDay();
   return day === 0 || day === 6;
 }
 
+/* 這一天為什麼算假日／平日，用來在畫面上講清楚 */
+export function holidayReason(dateStr, calendar = EMPTY_HOLIDAY_CALENDAR) {
+  if (!dateStr) return '';
+  const date = String(dateStr);
+  const cal = { ...EMPTY_HOLIDAY_CALENDAR, ...(calendar || {}) };
+  if ((cal.workdays || []).includes(date)) return '已指定為平日';
+  if ((cal.holidays || []).includes(date)) return '已指定為假日';
+  if ((cal.recurring || []).includes(date.slice(5))) return '國定假日';
+  const parts = date.split('-').map(Number);
+  if (parts.length < 3 || !parts[0]) return '';
+  const day = new Date(parts[0], parts[1] - 1, parts[2]).getDay();
+  return (day === 0 || day === 6) ? '週末' : '平日';
+}
+
 /* 單人定價：假日優先用假日價，沒填就退回平日價 */
-export function unitPriceOf(script, dateStr) {
+export function unitPriceOf(script, dateStr, calendar) {
   if (!script) return 0;
   const weekday = Number(script.priceWeekday) || 0;
   const holiday = Number(script.priceHoliday) || 0;
-  if (isHolidayDate(dateStr)) return holiday || weekday;
+  if (isHolidayDate(dateStr, calendar)) return holiday || weekday;
   return weekday || holiday;
 }
